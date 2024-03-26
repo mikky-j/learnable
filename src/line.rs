@@ -112,18 +112,23 @@ impl LinePlugin {
         }
     }
 
-    fn toggle_line(
+    fn toggle_line_state(
         mut line_state_write: EventWriter<ChangeLineState>,
         line_state: Res<State<LineState>>,
+        active_box: Res<ActiveBox>,
     ) {
         let line_state = line_state.get();
 
-        let new_state = match &line_state {
-            LineState::Drawing => LineState::NotDrawing,
-            LineState::NotDrawing => LineState::Drawing,
-        };
+        if active_box.entity.is_some() {
+            let new_state = match &line_state {
+                LineState::Drawing => LineState::NotDrawing,
+                LineState::NotDrawing => LineState::Drawing,
+            };
 
-        line_state_write.send(ChangeLineState(new_state));
+            line_state_write.send(ChangeLineState(new_state));
+        } else {
+            info!("Cannot change line state because there's no active box")
+        }
     }
 
     fn despawn_actively_drawing_line(
@@ -248,7 +253,7 @@ impl Plugin for LinePlugin {
             .add_systems(
                 Update,
                 (
-                    Self::toggle_line.run_if(input_just_released(KeyCode::Space)),
+                    Self::toggle_line_state.run_if(input_just_released(KeyCode::Space)),
                     (
                         Self::connect_to_hovered_box,
                         Self::connect_two_boxes.run_if(input_just_pressed(MouseButton::Left)),

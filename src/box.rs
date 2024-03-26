@@ -41,7 +41,7 @@ pub struct ActiveBox {
 }
 
 #[derive(States, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default)]
-enum DragState {
+enum BoxDragState {
     DragStarted,
     #[default]
     DragEnded,
@@ -214,12 +214,30 @@ impl BoxPlugin {
         }
     }
 
-    fn start_drag(mut next_state: ResMut<NextState<DragState>>) {
-        next_state.set(DragState::DragStarted);
+    fn start_drag(
+        mut next_state: ResMut<NextState<BoxDragState>>,
+        mut hover_reader: EventReader<BoxHoverEvent>,
+    ) {
+        if let Some(_) = hover_reader
+            .read()
+            .last()
+            .map(|&BoxHoverEvent(event)| event)
+            .flatten()
+        {
+            next_state.set(BoxDragState::DragStarted);
+        }
     }
 
-    fn end_drag(mut next_state: ResMut<NextState<DragState>>) {
-        next_state.set(DragState::DragEnded);
+    fn end_drag(mut next_state: ResMut<NextState<BoxDragState>>) {
+        next_state.set(BoxDragState::DragEnded);
+    }
+
+    fn print_hover_events(mut hover_reader: EventReader<BoxHoverEvent>) {
+        for &BoxHoverEvent(event) in hover_reader.read() {
+            if let Some(entity) = event {
+                info!("Hovering on {entity:?} right now");
+            }
+        }
     }
 }
 
@@ -227,7 +245,7 @@ impl Plugin for BoxPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<ChangedActiveBoxEvent>()
             .add_event::<BoxHoverEvent>()
-            .init_state::<DragState>()
+            .init_state::<BoxDragState>()
             .insert_resource(ActiveBox::default())
             .add_systems(Startup, Self::spawn_box)
             .add_systems(
@@ -240,15 +258,16 @@ impl Plugin for BoxPlugin {
                         Self::change_box_color_for_active.run_if(in_state(LineState::NotDrawing)),
                         Self::change_active.run_if(in_state(LineState::NotDrawing)),
                     )
-                        .run_if(in_state(DragState::DragEnded))
+                        .run_if(in_state(BoxDragState::DragEnded))
                         .chain(),
                     Self::start_drag.run_if(
                         in_state(LineState::NotDrawing)
                             .and_then(input_just_pressed(MouseButton::Left)),
                     ),
-                    Self::move_box_according_to_mouse.run_if(in_state(DragState::DragStarted)),
+                    Self::move_box_according_to_mouse.run_if(in_state(BoxDragState::DragStarted)),
                     Self::end_drag.run_if(input_just_released(MouseButton::Left)),
                     Self::update_positions,
+                    Self::print_hover_events,
                 )
                     .chain(),
             );
