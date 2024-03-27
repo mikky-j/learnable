@@ -5,12 +5,15 @@ use bevy::{
 };
 
 use crate::{
-    r#box::{ActiveBox, BoxHoverEvent},
+    r#box::{ActiveBox, Box, BoxHoverEvent},
     translate_vec_to_world,
-    utils::Position,
+    utils::{self, Position},
 };
 
 type LineTarget = crate::r#box::Box;
+
+const LINE_COLOR: Color = Color::YELLOW;
+const ACTIVE_LINE_COLOR: Color = Color::RED;
 
 // This is a marker for a line
 #[derive(Component, Clone, Copy)]
@@ -21,6 +24,8 @@ pub struct Line {
     to: Option<Entity>,
     // This shows if a line is connected
     connected: bool,
+    // This is the color of the line
+    color: Color,
 }
 
 #[derive(Debug, States, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Clone, Copy)]
@@ -35,6 +40,11 @@ pub struct ActivelyDrawingLine {
     entity: Option<Entity>,
 }
 
+#[derive(Resource, Default)]
+pub struct SelectedLine {
+    entity: Option<Entity>,
+}
+
 #[derive(Event)]
 pub struct ConnectLine(pub Entity);
 
@@ -44,12 +54,19 @@ pub struct ConnectLineHover(pub Option<Entity>);
 #[derive(Event)]
 pub struct ChangeLineState(pub LineState);
 
+#[derive(Event, Debug, Default)]
+pub struct SelectLine(pub Option<Entity>);
+
+#[derive(Event, Debug)]
+pub struct DeleteLine(pub Entity);
+
 impl Line {
     pub fn spawn_default(from: Entity) -> Self {
         Self {
             from,
             to: None,
             connected: false,
+            color: LINE_COLOR,
         }
     }
 }
@@ -98,7 +115,7 @@ impl LinePlugin {
             };
 
             gizmos
-                .arrow_2d(from_position, to_position, Color::YELLOW)
+                .arrow_2d(from_position, to_position, line.color)
                 .with_tip_length(10.);
         }
     }
@@ -175,7 +192,7 @@ impl LinePlugin {
     fn connect_two_boxes(
         active_line: ResMut<ActivelyDrawingLine>,
         lines: Query<&Line>,
-        mut writer: EventWriter<ConnectLine>, // mut next_state: ResMut<NextState<LineState>>,
+        mut writer: EventWriter<ConnectLine>,
     ) {
         if let Some(active_line_entity) = active_line.entity {
             if let Ok(line) = lines.get(active_line_entity) {
@@ -183,15 +200,6 @@ impl LinePlugin {
                     writer.send(ConnectLine(line.to.unwrap()));
                 }
             }
-        }
-    }
-
-    fn log_transitions(mut transitions: EventReader<StateTransitionEvent<LineState>>) {
-        for transition in transitions.read() {
-            info!(
-                "Moving from {:?} ==> {:?}",
-                transition.before, transition.after
-            )
         }
     }
 
@@ -236,6 +244,92 @@ impl LinePlugin {
             }
         }
     }
+
+    fn handle_select_line(
+        mut lines: Query<&mut Line>,
+        mut selected_event_reader: EventReader<SelectLine>,
+        selected_line: Res<SelectedLine>,
+    ) {
+        // Only modify the colors if there's a new event fired
+        for &SelectLine(next_selected) in selected_event_reader.read() {
+            // Change the new selected line
+            if let Some(next_selected) = next_selected {
+                let mut next_line = lines
+                    .get_mut(next_selected)
+                    .expect("Couldn't get a mutable reference to line");
+
+                next_line.color = ACTIVE_LINE_COLOR;
+            }
+
+            // Change the old selected line
+            if let Some(selected_entity) = selected_line.entity {
+                let mut curr_line = lines
+                    .get_mut(selected_entity)
+                    .expect("Couldn't get a mutable reference to line");
+                curr_line.color = LINE_COLOR;
+            }
+        }
+    }
+
+    fn change_selected_line(
+        mut selected_line: ResMut<SelectedLine>,
+        mut selected_event_reader: EventReader<SelectLine>,
+    ) {
+        for &SelectLine(new_line) in selected_event_reader.read() {
+            selected_line.entity = new_line;
+        }
+    }
+
+    fn delete_selected_line(
+        selected_line: Res<SelectedLine>,
+        mut delete_line_writer: EventWriter<DeleteLine>,
+    ) {
+        if let Some(line_entity) = selected_line.entity {
+            delete_line_writer.send(DeleteLine(line_entity));
+        }
+    }
+
+    fn handle_delete_line(
+        mut commands: Commands,
+        mut delete_line_reader: EventReader<DeleteLine>,
+        mut selected_line: ResMut<SelectedLine>,
+    ) {
+        for &DeleteLine(line) in delete_line_reader.read() {
+            if let Some(line_commands) = commands.get_entity(line) {
+                line_commands.despawn_recursive();
+                selected_line.entity = None;
+            }
+        }
+    }
+
+    fn select_line(
+        positions: Query<&Position, With<Box>>,
+        lines: Query<(Entity, &Line)>,
+        window: Query<&Window, With<PrimaryWindow>>,
+        mut selected_event: EventWriter<SelectLine>,
+    ) {
+        if let Some(window) = window.get_single().ok() {
+            let cursor_pos = window
+                .cursor_position()
+                .expect("Expected mouse to be in screen");
+            for (line_entity, line) in lines.iter().filter(|(_, line)| line.connected) {
+                // Unwrap is okay here because you cannot have a `to` that is none for a line that is
+                // connnected
+                let from_pos = positions.get(line.from).unwrap();
+                let to_pos = positions.get(line.to.unwrap()).unwrap();
+                if utils::point_line_collision(
+                    (from_pos.0, to_pos.0),
+                    translate_vec_to_world(cursor_pos, window.height(), window.width()),
+                    Some(1.),
+                ) {
+                    selected_event.send(SelectLine(Some(line_entity)));
+                    return;
+                }
+            }
+        }
+        // This would send that there's no line selected
+        selected_event.send_default();
+    }
 }
 
 impl Plugin for LinePlugin {
@@ -244,7 +338,10 @@ impl Plugin for LinePlugin {
             .add_event::<ConnectLineHover>()
             .add_event::<ConnectLine>()
             .add_event::<ChangeLineState>()
-            .insert_resource(ActivelyDrawingLine::default())
+            .add_event::<SelectLine>()
+            .add_event::<DeleteLine>()
+            .init_resource::<SelectedLine>()
+            .init_resource::<ActivelyDrawingLine>()
             .add_systems(OnEnter(LineState::Drawing), Self::spawn_line)
             .add_systems(
                 OnExit(LineState::Drawing),
@@ -262,7 +359,16 @@ impl Plugin for LinePlugin {
                         .run_if(in_state(LineState::Drawing))
                         .chain(),
                     Self::handle_line_state_change,
-                    Self::log_transitions,
+                    Self::select_line.run_if(
+                        in_state(LineState::NotDrawing)
+                            .and_then(input_just_pressed(MouseButton::Left)),
+                    ),
+                    Self::handle_select_line,
+                    Self::change_selected_line,
+                    Self::delete_selected_line.run_if(input_just_released(KeyCode::Backspace)),
+                    Self::handle_delete_line,
+                    utils::print_events::<SelectLine>,
+                    utils::log_transitions::<LineState>,
                 )
                     .chain(),
             )
