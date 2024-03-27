@@ -50,7 +50,7 @@ enum BoxDragState {
 #[derive(Event, Default)]
 struct ChangedActiveBoxEvent(pub Option<Entity>);
 
-#[derive(Event, Default)]
+#[derive(Event, Default, Debug)]
 pub struct BoxHoverEvent(pub Option<Entity>);
 
 impl BoxPlugin {
@@ -194,9 +194,7 @@ impl BoxPlugin {
     ) {
         let window = window.single();
         if let Some(entity) = active.entity {
-            // if mouse_button_input.just_pressed(MouseButton::Left) {
             for cursor in cursor_motions.read() {
-                // If we clicked
                 let mut positions = boxes
                     .get_mut(entity)
                     .expect("Expected Active Entity to exist");
@@ -204,7 +202,6 @@ impl BoxPlugin {
                 positions.0 =
                     translate_vec_to_world(cursor.position, window.height(), window.width());
             }
-            // }
         }
     }
 
@@ -230,14 +227,6 @@ impl BoxPlugin {
 
     fn end_drag(mut next_state: ResMut<NextState<BoxDragState>>) {
         next_state.set(BoxDragState::DragEnded);
-    }
-
-    fn print_hover_events(mut hover_reader: EventReader<BoxHoverEvent>) {
-        for &BoxHoverEvent(event) in hover_reader.read() {
-            if let Some(entity) = event {
-                info!("Hovering on {entity:?} right now");
-            }
-        }
     }
 }
 
@@ -267,7 +256,7 @@ impl Plugin for BoxPlugin {
                     Self::move_box_according_to_mouse.run_if(in_state(BoxDragState::DragStarted)),
                     Self::end_drag.run_if(input_just_released(MouseButton::Left)),
                     Self::update_positions,
-                    Self::print_hover_events,
+                    // print_events::<BoxHoverEvent>,
                 )
                     .chain(),
             );
