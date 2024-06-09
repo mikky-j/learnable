@@ -9,6 +9,24 @@ use bevy::{math::bounding::Aabb2d, prelude::*};
 
 use crate::connectors::ConnectionDirection;
 
+/// Expects the points to be top left aligned NOT CENTERED ALIGN
+pub fn get_grid(
+    (from_pos, from_size): (Vec2, Vec2),
+    (to_pos, to_size): (Vec2, Vec2),
+) -> [Vec2; 49] {
+    let from_rect = Rect::from_center_size(from_pos, from_size);
+    let to_rect = Rect::from_center_size(from_pos, from_size);
+
+    let smallest_rect = match from_rect.min.min(to_rect.min) {
+        x if x == from_rect.min => from_rect,
+        _ => to_rect,
+    };
+
+    let grid = [Vec2::default(); 49];
+
+    grid
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ConnectionType {
     Flow = 0,
@@ -45,8 +63,9 @@ pub enum Shape {
     Diamond,
 }
 
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub enum BlockType {
+    #[default]
     Declaration,
     Variable,
     Text,
@@ -67,12 +86,24 @@ impl BlockType {
         }
     }
 
+    pub const fn can_be_in_a_hole(&self) -> bool {
+        match self {
+            BlockType::Declaration => false,
+            BlockType::Variable => true,
+            BlockType::Text => true,
+            BlockType::If => false,
+            BlockType::Comparison => true,
+            BlockType::Start => false,
+        }
+    }
+
     #[inline]
     pub const fn get_holes(&self) -> usize {
         match self {
             BlockType::Declaration => 2,
             BlockType::If => 1,
             BlockType::Comparison => 3,
+            BlockType::Text => 1,
             _ => 0,
         }
     }
@@ -89,7 +120,7 @@ impl BlockType {
     #[inline]
     pub fn to_string(&self) -> String {
         let val = format!("{:?}", self);
-        return val;
+        val
         // match self {
         //     BlockType::Declaration => "Variable",
         //     BlockType::If => "If",
@@ -101,8 +132,20 @@ impl BlockType {
     }
 }
 
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Position(pub Vec2);
+
+impl Position {
+    #[inline]
+    pub const fn x(&self) -> f32 {
+        self.0.x
+    }
+
+    #[inline]
+    pub const fn y(&self) -> f32 {
+        self.0.y
+    }
+}
 
 pub fn log_transitions<T: States>(mut transitions: EventReader<StateTransitionEvent<T>>) {
     for transition in transitions.read() {

@@ -1,13 +1,14 @@
 use bevy::{math::bounding::BoundingVolume, prelude::*};
 
 use crate::{
-    focus::{ActiveEntity, DragEntity, DragState, FocusBundle, FocusColor},
+    focus::{ActiveEntity, DragEntity, DragState, Draggable, FocusColor, InteractionFocusBundle},
     ui_box::Block,
-    ui_line::{ActivelyDrawingLine, ConnectLine, TempConnectLine, UiLine},
+    ui_line::{ConnectLine, TempConnectLine},
     utils::{get_aabb2d, get_relative_direction, ConnectionType, Position, Size},
+    GameSets,
 };
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConnectionDirection {
     Left,
     Right,
@@ -50,6 +51,34 @@ impl ConnectionDirection {
             _ => 0.,
         }
     }
+
+    pub const fn get_vec(&self) -> Vec2 {
+        Vec2::new(self.get_left(), self.get_top())
+    }
+
+    pub const fn get_center_top(&self) -> f32 {
+        match self {
+            ConnectionDirection::Left => 0.,
+            ConnectionDirection::Right => 0.,
+            ConnectionDirection::Top => 50.,
+            ConnectionDirection::Bottom => -50.,
+            ConnectionDirection::Center => 0.,
+        }
+    }
+
+    pub const fn get_center_left(&self) -> f32 {
+        match self {
+            ConnectionDirection::Left => -50.,
+            ConnectionDirection::Right => 50.,
+            ConnectionDirection::Top => 0.,
+            ConnectionDirection::Bottom => 0.,
+            ConnectionDirection::Center => 0.,
+        }
+    }
+
+    pub const fn get_center_vec(&self) -> Vec2 {
+        Vec2::new(self.get_center_left(), self.get_center_top())
+    }
 }
 
 #[derive(Bundle)]
@@ -57,9 +86,10 @@ pub struct ConnectorBundle {
     connector: Connector,
     node: NodeBundle,
     size: Size,
-    label: crate::Label,
+    label: crate::EntityLabel,
     position: Position,
-    focus_bundle: FocusBundle,
+    focus_bundle: InteractionFocusBundle,
+    draggable: Draggable,
 }
 
 #[derive(Debug, Resource, Default)]
@@ -72,17 +102,12 @@ impl ConnectorBundle {
         let top = connector.direction.get_top();
         let left = connector.direction.get_left();
 
-        // let offset = match connector.direction {
-        //     ConnectionDirection::Top | ConnectionDirection::Left => 1.,
-        //     ConnectionDirection::Right | ConnectionDirection::Bottom => -1.,
-        //     _ => 0.,
-        // };
-
         Self {
-            focus_bundle: FocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            focus_bundle: InteractionFocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
             connector,
             position,
-            label: crate::Label("Connector".into()),
+            draggable: Draggable,
+            label: crate::EntityLabel("Connector".into()),
             size: Size(Vec2::new(radius, radius)),
             node: NodeBundle {
                 style: Style {
@@ -93,6 +118,8 @@ impl ConnectorBundle {
                     height: Val::Px(radius),
                     ..default()
                 },
+                transform: Transform::default()
+                    .with_translation(Vec2::new(-radius, -radius).extend(0.) / 2.),
                 background_color: BackgroundColor(Color::WHITE),
                 focus_policy: bevy::ui::FocusPolicy::Block,
                 ..default()
@@ -127,10 +154,6 @@ impl ConnectorPlugin {
             let (parent_pos, &parent_size) = query
                 .get(connector.fixture)
                 .expect("Couldn't find the fixture's position");
-            // let Ok((parent_pos, &parent_size)) = query.get(connector.fixture) else {
-            //     error!("Couldn't find the fixture's position");
-            //     continue;
-            // };
             let mut size = parent_size.0;
             size.x *= connector.direction.get_left() / 100.;
             size.y *= connector.direction.get_top() / 100.;
@@ -173,6 +196,7 @@ impl ConnectorPlugin {
                 .read()
                 .map(|motion| motion.delta.unwrap_or_default())
             {
+                info!("I ran in move_connector_according_to_mouse");
                 let transform = Transform::default().with_translation(delta.extend(0.));
                 *global = global.mul_transform(transform);
             }
@@ -191,29 +215,19 @@ impl ConnectorPlugin {
     }
 
     fn reset_position(
-        active: Res<ActiveEntity>,
-        mut connectors: Query<(&Connector, &Node, &mut GlobalTransform)>,
-        styles: Query<(&Position, &Node), Without<Connector>>,
+        active: Res<DragEntity>,
+        mut connectors: Query<&mut GlobalTransform, With<Connector>>,
     ) {
-        if let Some((connector, connector_node, mut global_connector)) = active
+        if let Some(mut global_connector) = active
             .entity
-            .map(|entity| connectors.get_mut(entity).ok())
-            .flatten()
+            .and_then(|entity| connectors.get_mut(entity).ok())
         {
-            let (pos, node) = styles
-                .get(connector.fixture)
-                .expect("Expected parent to be in the world tree");
-            let mut size = node.size();
+            info!("I ran in reset");
+            let old_pos = active.drag_start.unwrap().extend(0.);
+            let new_pos = old_pos - global_connector.translation();
 
-            size.x *= connector.direction.get_left() / 100.;
-            size.y *= connector.direction.get_top() / 100.;
-            let target = pos.0 + size;
-            let translation = target.extend(0.) - global_connector.translation();
             *global_connector =
-                global_connector.mul_transform(Transform::default().with_translation(
-                    translation + (connector_node.size().extend(0.) - Vec3::new(3., 3., 0.)),
-                ));
-            // if active.
+                global_connector.mul_transform(Transform::default().with_translation(new_pos));
         }
     }
 
@@ -296,7 +310,8 @@ impl Plugin for ConnectorPlugin {
                     Self::check_collision.run_if(in_state(DragState::Started)),
                     Self::set_connect_line,
                     Self::hide_connector,
-                ),
+                )
+                    .in_set(GameSets::Running),
             )
             .add_systems(PostUpdate, Self::handle_spawn_connector)
             .add_systems(OnExit(DragState::Started), Self::reset_position);

@@ -1,9 +1,17 @@
-// mod ast;
+#![allow(clippy::type_complexity)]
+
+// TODO:
+// - Fix focus to allow focusing on lines
+// - Fix `ui_box` to allow the dragging outside of arguments
+
+mod ast;
+//
 // mod r#box;
 mod connectors;
 // mod line;
 mod collision;
 mod focus;
+mod text_input;
 mod ui_box;
 mod ui_line;
 mod utils;
@@ -11,12 +19,12 @@ mod utils;
 use bevy::{app::PluginGroupBuilder, prelude::*, window::PresentMode};
 use ui_line::UiLinePlugin;
 
-use crate::{focus::FocusPlugin, ui_box::UIBoxPlugin};
+use crate::{focus::FocusPlugin, text_input::CustomTextInputPlugin, ui_box::UIBoxPlugin};
 use connectors::ConnectorPlugin;
 // use line::LinePlugin;
 // use r#box::BoxPlugin;
 
-// use crate::{ast::ASTPlugin, ui_box::UIBoxPlugin};
+use ast::ASTPlugin;
 // use ui_box::UIBoxPlugin;
 
 pub const WINDOW_HEIGHT: f32 = 600.;
@@ -51,8 +59,20 @@ pub fn box_pos_collision(subject: Vec2, (target_pos, target_size): (Vec2, Vec2))
         && subject.y <= (target_pos.y + target_size.y)
 }
 
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct Label(pub String);
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct EntityLabel(pub String);
+
+impl EntityLabel {
+    pub fn new(data: impl Into<String>) -> Self {
+        Self(data.into())
+    }
+}
+
+#[derive(SystemSet, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy)]
+pub enum GameSets {
+    Running,
+    Despawn,
+}
 
 pub struct GamePlugin;
 
@@ -78,15 +98,23 @@ impl GamePlugin {
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, Self::spawn_camera)
-            .add_systems(Last, Self::handle_delete_block)
+        app.configure_sets(Update, (GameSets::Despawn, GameSets::Running).chain())
+            .add_systems(Startup, Self::spawn_camera)
+            .add_systems(
+                Update,
+                apply_deferred
+                    .before(GameSets::Running)
+                    .after(GameSets::Despawn),
+            )
+            .add_systems(Update, Self::handle_delete_block.in_set(GameSets::Despawn))
             .add_event::<DeleteEvent>()
             // .add_plugins(BoxPlugin)
             .add_plugins(FocusPlugin)
             .add_plugins(UiLinePlugin)
             // .add_plugins(LinePlugin)
-            // .add_plugins(ASTPlugin)
+            .add_plugins(ASTPlugin)
             .add_plugins(UIBoxPlugin)
+            .add_plugins(CustomTextInputPlugin)
             .add_plugins(ConnectorPlugin);
     }
 }

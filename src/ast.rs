@@ -1,11 +1,77 @@
 use std::fmt::Display;
 
-use bevy::{input::common_conditions::input_just_released, prelude::*, utils::HashMap};
+use bevy::{
+    input::common_conditions::{input_just_pressed, input_just_released},
+    prelude::*,
+    utils::HashMap,
+};
+use bevy_simple_text_input::TextInputValue;
 
 use crate::{
     focus::DragState,
+    text_input::TextInput,
+    ui_box::Hole,
     utils::{BlockType, ConnectionType},
+    GameSets,
 };
+
+#[derive(Debug)]
+pub enum BlockData {
+    Hole(Entity, usize),
+    Value(String),
+}
+
+#[derive(Debug, Resource, Default)]
+pub struct BlockDataMap {
+    pub map: HashMap<Entity, Vec<BlockData>>,
+}
+
+fn get_block_data_hashmap(
+    holes: Query<(Entity, &Hole)>,
+    children: Query<&Children>,
+    block_type: Query<(Entity, &BlockType)>,
+    text_input: Query<(&TextInput, &TextInputValue)>,
+    mut block_map: ResMut<BlockDataMap>,
+) {
+    let mut hashmap: HashMap<Entity, Vec<BlockData>> = HashMap::default();
+    for (hole_entity, hole) in &holes {
+        let value = hashmap.entry(hole.owner).or_default();
+        let Some((child_entity, child_block)) =
+            children.get(hole_entity).ok().and_then(|children| {
+                children
+                    .iter()
+                    .find_map(|&child| block_type.get(child).ok())
+            })
+        else {
+            info!("Hole {hole_entity:?} children were not block_types");
+            continue;
+        };
+
+        match child_block {
+            BlockType::Text => {
+                let Some((_, text_value)) = text_input
+                    .iter()
+                    .find(|(text_input, _)| text_input.owner == child_entity)
+                else {
+                    info!("Entity {child_entity:?} had a BlockType::Text but no TextInputValue");
+                    continue;
+                };
+                value.push(BlockData::Value(text_value.0.clone()));
+            }
+            _ => value.push(BlockData::Hole(child_entity, hole.order)),
+        }
+    }
+
+    let block_key = hashmap
+        .keys()
+        .filter_map(|&key| block_type.get(key).map(|(_, block_type)| block_type).ok())
+        .collect::<Vec<_>>();
+
+    info!("Block types of keys: {:?}", block_key);
+    info!("Hashmap: {hashmap:#?}");
+
+    block_map.map = hashmap;
+}
 
 #[derive(Resource, Debug, Default)]
 pub struct Ast {
@@ -32,32 +98,32 @@ impl Traverse {
         }
     }
 
-    fn print(&self, boxes: &Query<(Entity, &BlockType), With<crate::r#box::Box>>) -> String {
-        let mut result = String::with_capacity(256);
-
-        let (_, start_block_type) = boxes
-            .get(self.entity)
-            .expect("Expected box to be in the tree");
-
-        result.push_str(format!("( {start_block_type} ").as_str());
-
-        if let Some(left) = &self.left {
-            result.push_str(left.print(boxes).as_str());
-        }
-
-        if let Some(right) = &self.right {
-            result.push_str(right.print(boxes).as_str());
-        }
-
-        result.push_str(") ");
-
-        if let Some(flow) = &self.flow {
-            result.push_str(" -> ");
-            result.push_str(flow.print(boxes).as_str());
-        }
-        result
-    }
-
+    // fn print(&self, boxes: &Query<(Entity, &BlockType), With<crate::r#box::Box>>) -> String {
+    //     let mut result = String::with_capacity(256);
+    //
+    //     let (_, start_block_type) = boxes
+    //         .get(self.entity)
+    //         .expect("Expected box to be in the tree");
+    //
+    //     result.push_str(format!("( {start_block_type} ").as_str());
+    //
+    //     if let Some(left) = &self.left {
+    //         result.push_str(left.print(boxes).as_str());
+    //     }
+    //
+    //     if let Some(right) = &self.right {
+    //         result.push_str(right.print(boxes).as_str());
+    //     }
+    //
+    //     result.push_str(") ");
+    //
+    //     if let Some(flow) = &self.flow {
+    //         result.push_str(" -> ");
+    //         result.push_str(flow.print(boxes).as_str());
+    //     }
+    //     result
+    // }
+    //
     fn set_val(&mut self, connection_type: ConnectionType, traverse: Self) {
         match connection_type {
             ConnectionType::Flow => self.flow = Some(Box::new(traverse)),
@@ -135,37 +201,40 @@ impl ASTPlugin {
         }
     }
 
-    fn print_ast(
-        global_ast: Res<Ast>,
-        boxes: Query<(Entity, &BlockType), With<crate::r#box::Box>>,
-    ) {
-        let Some(start) = boxes
-            .iter()
-            .find(|&(_, block_type)| *block_type == BlockType::Start)
-            .map(|(e, _)| e)
-        else {
-            return;
-        };
-        let traverse = global_ast.traverse_tree(start);
-        info!("{}", traverse.print(&boxes));
-    }
+    // fn print_ast(
+    //     global_ast: Res<Ast>,
+    //     boxes: Query<(Entity, &BlockType), With<crate::r#box::Box>>,
+    // ) {
+    //     let Some(start) = boxes
+    //         .iter()
+    //         .find(|&(_, block_type)| *block_type == BlockType::Start)
+    //         .map(|(e, _)| e)
+    //     else {
+    //         return;
+    //     };
+    //     let traverse = global_ast.traverse_tree(start);
+    //     info!("{}", traverse.print(&boxes));
+    // }
 }
 
 impl Plugin for ASTPlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
         app.init_resource::<Ast>()
+            .init_resource::<BlockDataMap>()
             .add_event::<AddToASTEvent>()
             .add_event::<RemoveFromAST>()
             .add_systems(
                 Update,
                 (
-                    Self::handle_add_to_ast,
-                    Self::handle_remove_from_ast,
-                    Self::print_ast.run_if(
-                        in_state(DragState::Ended).and_then(input_just_released(KeyCode::KeyP)),
-                    ),
+                    get_block_data_hashmap.run_if(input_just_pressed(KeyCode::KeyP))
+                    // Self::handle_add_to_ast,
+                    // Self::handle_remove_from_ast,
+                    // Self::print_ast.run_if(
+                    //     in_state(DragState::Ended).and_then(input_just_released(KeyCode::KeyP)),
+                    // ),
                 )
-                    .chain(),
+                .chain()
+                .in_set(GameSets::Running),
             );
     }
 }

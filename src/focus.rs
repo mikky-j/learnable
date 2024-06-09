@@ -1,9 +1,26 @@
 use bevy::{
-    input::common_conditions::{input_just_released, input_pressed},
+    input::common_conditions::{input_just_pressed, input_just_released, input_pressed},
     prelude::*,
 };
 
-use crate::{utils::print_events, DeleteEvent};
+use crate::{
+    ui_line::Segment,
+    utils::{point_line_collision, print_events},
+    DeleteEvent, EntityLabel, GameSets,
+};
+
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Focus {
+    pub active: Color,
+    pub inactive: Color,
+    pub hover: Color,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct LineFocus;
+
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Draggable;
 
 #[derive(Debug, Resource, Default)]
 pub struct ActiveEntity {
@@ -18,6 +35,8 @@ pub struct HoverEntity {
 #[derive(Debug, Resource, Default)]
 pub struct DragEntity {
     pub entity: Option<Entity>,
+    /// This is the start Global translation of the object that is being dragged
+    pub drag_start: Option<Vec2>,
 }
 
 #[derive(Debug, States, PartialEq, Eq, Hash, Clone, Copy, Default)]
@@ -33,27 +52,30 @@ pub struct HoverEvent(pub Option<Entity>);
 #[derive(Debug, Clone, Copy, Event)]
 pub struct SelectEvent(pub Option<Entity>);
 
-#[derive(Debug, Clone, Copy, Component)]
+#[derive(Debug, Clone, Copy, Component, Default)]
 pub struct FocusColor(pub Color);
 
-#[derive(Component, Clone, Copy, Debug)]
-pub struct Focus {
-    pub active: Color,
-    pub inactive: Color,
-    pub hover: Color,
-}
-
-#[derive(Debug, Bundle, Clone, Copy)]
+#[derive(Debug, Bundle, Clone, Copy, Default)]
 pub struct FocusBundle {
     focus: Focus,
     focus_color: FocusColor,
+}
+
+#[derive(Debug, Bundle, Clone, Copy)]
+pub struct InteractionFocusBundle {
+    focus_bundle: FocusBundle,
     interaction: Interaction,
+}
+
+#[derive(Debug, Bundle, Clone, Copy)]
+pub struct LineFocusBundle {
+    focus_bundle: FocusBundle,
+    interaction: LineFocus,
 }
 
 impl FocusBundle {
     pub fn new(active: Color, hover: Color, inactive: Color) -> Self {
         Self {
-            interaction: Interaction::default(),
             focus: Focus {
                 active,
                 inactive,
@@ -64,26 +86,51 @@ impl FocusBundle {
     }
 }
 
+impl LineFocusBundle {
+    pub fn new(active: Color, hover: Color, inactive: Color) -> Self {
+        Self {
+            interaction: LineFocus,
+            focus_bundle: FocusBundle::new(active, hover, inactive),
+        }
+    }
+}
+
+impl InteractionFocusBundle {
+    pub fn new(active: Color, hover: Color, inactive: Color) -> Self {
+        Self {
+            interaction: Interaction::default(),
+            focus_bundle: FocusBundle::new(active, hover, inactive),
+        }
+    }
+}
+
+impl Default for InteractionFocusBundle {
+    fn default() -> Self {
+        Self {
+            focus_bundle: FocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            interaction: Default::default(),
+        }
+    }
+}
+
 pub struct FocusPlugin;
 
 impl FocusPlugin {
     fn handle_interaction(
         interactions: Query<(Entity, &Interaction), (Changed<Interaction>, With<Focus>)>,
-        labels: Query<&crate::Label>,
+        // labels: Query<&EntityLabel>,
         mut select_writer: EventWriter<SelectEvent>,
         mut hover_writer: EventWriter<HoverEvent>,
     ) {
         for (entity, &interaction) in &interactions {
-            let label = labels
-                .get(entity)
-                .expect("Expected component to have a label");
+            // let label = labels.get(entity).unwrap_or_default();
             match interaction {
                 Interaction::Pressed => {
-                    info!("{} was selected", label.0);
+                    // info!("{} was selected", label.0);
                     select_writer.send(SelectEvent(Some(entity)));
                 }
                 Interaction::Hovered => {
-                    info!("{} was hovered", label.0);
+                    // info!("{} was hovered", label.0);
                     hover_writer.send(HoverEvent(Some(entity)));
                 }
                 Interaction::None => (),
@@ -136,39 +183,6 @@ impl FocusPlugin {
                     focus_color.0 = focus.inactive;
                 }
             }
-
-            // // if the entity that I am hovering is some and is the selected entity, we skip
-            // if new_hover_box.is_some() && new_hover_box == selected_box.entity {
-            //     continue;
-            // }
-            // // If the old hover box is the same as the new entity, we skip
-            // if old_hover_box.entity.is_some() && old_hover_box.entity == new_hover_box {
-            //     continue;
-            // }
-            //
-            // // Change the new hover box's color to the hover color
-            // if let Some(box_entity) = new_hover_box {
-            //     let (mut focus_color, focus) = color
-            //         .get_mut(box_entity)
-            //         .expect("Expected the hover entity to be in the tree");
-            //     focus_color.0 = focus.hover;
-            // }
-            //
-            // // If the old hover box is the same as the active entity, we skip
-            // if old_hover_box.entity.is_some() && old_hover_box.entity == selected_box.entity {
-            //     continue;
-            // }
-            //
-            // // Change the old hover box's color to the inactive color
-            // if let Some(old_entity) = old_hover_box
-            //     .entity
-            //     .filter(|&old_entity| !new_hover_box.is_some_and(|new| new == old_entity))
-            // {
-            //     let (mut focus_color, focus) = color
-            //         .get_mut(old_entity)
-            //         .expect("Expected old hovered box to be in the tree");
-            //     focus_color.0 = focus.inactive;
-            // }
         }
     }
 
@@ -185,16 +199,28 @@ impl FocusPlugin {
     }
 
     fn start_drag_state(
-        hover: Query<&Interaction, With<Focus>>,
+        hover: Query<&Interaction, With<Draggable>>,
         active: Res<ActiveEntity>,
         mut next_state: ResMut<NextState<DragState>>,
         mut drag: ResMut<DragEntity>,
+        global_translation: Query<&GlobalTransform>,
     ) {
-        if let Some(entity) = active.entity {
-            if hover.get(entity).expect("Should never fail") == &Interaction::Pressed {
-                next_state.set(DragState::Started);
-                drag.entity = Some(entity);
-            }
+        if let Some(entity) = active.entity.filter(|&entity| {
+            // Check if the hovered entity has a draggable component
+            hover
+                .get(entity)
+                .ok()
+                .is_some_and(|interaction| matches!(interaction, Interaction::Pressed))
+        }) {
+            next_state.set(DragState::Started);
+            drag.entity = Some(entity);
+            drag.drag_start = Some(
+                global_translation
+                    .get(entity)
+                    .expect("All entities should have a global translation right?")
+                    .translation()
+                    .xy(),
+            );
         }
     }
 
@@ -204,7 +230,8 @@ impl FocusPlugin {
 
     fn handle_drag_state_transitions(
         mut transitions: EventReader<StateTransitionEvent<DragState>>,
-        hover: Query<&Interaction, With<Focus>>,
+        global_translation: Query<&GlobalTransform>,
+        hover: Query<&Interaction, With<Draggable>>,
         active: Res<ActiveEntity>,
         mut drag: ResMut<DragEntity>,
     ) {
@@ -214,11 +241,19 @@ impl FocusPlugin {
                     if let Some(entity) = active.entity {
                         if hover.get(entity).expect("Should never fail") == &Interaction::Pressed {
                             drag.entity = Some(entity);
+                            // drag.drag_start = Some(
+                            //     global_translation
+                            //         .get(entity)
+                            //         .expect("All entities should have a global translation right?")
+                            //         .translation()
+                            //         .xy(),
+                            // );
                         }
                     }
                 }
                 DragState::Ended => {
                     drag.entity = None;
+                    drag.drag_start = None;
                 }
             }
         }
@@ -239,6 +274,23 @@ impl FocusPlugin {
             next_state.set(DragState::Ended);
         }
     }
+
+    fn handle_focus_line(
+        query: Query<&Segment>,
+        mouse_button_input: Res<ButtonInput<MouseButton>>,
+        mut cursor_motion: EventReader<CursorMoved>,
+        mut hover_writer: EventWriter<HoverEvent>,
+        mut select_writer: EventWriter<SelectEvent>,
+    ) {
+        for segments in &query {
+            for motion in cursor_motion.read() {
+                if point_line_collision((segments.from, segments.to), motion.position, Some(1.)) {
+                    info!("Hovering on {:?}", segments.owner);
+                    hover_writer.send(HoverEvent(Some(segments.owner)));
+                }
+            }
+        }
+    }
 }
 
 impl Plugin for FocusPlugin {
@@ -253,22 +305,25 @@ impl Plugin for FocusPlugin {
                 Update,
                 (
                     (
-                        Self::handle_interaction,
-                        Self::handle_hover_event,
-                        Self::set_hover,
-                        Self::handle_select_event,
-                        Self::set_active,
-                        Self::start_drag_state.run_if(input_pressed(MouseButton::Left)),
+                        (
+                            Self::handle_interaction,
+                            Self::handle_focus_line.run_if(in_state(DragState::Ended)),
+                            Self::handle_hover_event,
+                            Self::set_hover,
+                            Self::handle_select_event,
+                            Self::set_active,
+                            Self::start_drag_state.run_if(input_just_pressed(MouseButton::Left)),
+                        )
+                            .chain(),
+                        // .run_if(in_state(DragState::Ended)),
+                        Self::end_drag_state.run_if(
+                            in_state(DragState::Started)
+                                .and_then(input_just_released(MouseButton::Left)),
+                        ),
                     )
-                        .chain(),
-                    // .run_if(in_state(DragState::Ended)),
-                    Self::end_drag_state.run_if(
-                        in_state(DragState::Started)
-                            .and_then(input_just_released(MouseButton::Left)),
-                    ),
-                    Self::handle_delete,
-                )
-                    .chain(),
+                        .in_set(GameSets::Running),
+                    Self::handle_delete.in_set(GameSets::Despawn),
+                ),
             )
             .add_systems(Last, Self::handle_drag_state_transitions);
     }

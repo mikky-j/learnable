@@ -1,12 +1,20 @@
-use bevy::{input::common_conditions::input_just_released, prelude::*};
+use bevy::prelude::*;
 
 use crate::{
-    connectors::{ConnectionDirection, Connector, SpawnConnector},
-    focus::{ActiveEntity, DragEntity, DragState, HoverEntity},
+    connectors::{ConnectionDirection, Connector},
+    focus::{DragEntity, DragState, FocusColor, LineFocusBundle},
     translate_vec_to_world,
     ui_box::{BackgroundBox, Block},
-    utils::{log_transitions, print_events, Position, Size},
+    utils::{Position, Size},
+    DeleteEvent, GameSets,
 };
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Segment {
+    pub from: Vec2,
+    pub to: Vec2,
+    pub owner: Entity,
+}
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct UiLine {
@@ -22,6 +30,7 @@ pub struct UiLine {
 #[derive(Bundle, Debug, Clone, Copy)]
 pub struct LineBundle {
     line: UiLine,
+    focus_bundle: LineFocusBundle,
 }
 
 impl LineBundle {
@@ -32,6 +41,31 @@ impl LineBundle {
                 from_direction,
                 to,
                 to_direction: ConnectionDirection::Center,
+            },
+            focus_bundle: LineFocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+        }
+    }
+}
+
+#[derive(Debug, Bundle)]
+pub struct SegmentBundle {
+    segment: Segment,
+    node: NodeBundle,
+}
+
+impl SegmentBundle {
+    pub fn new(segment: Segment) -> Self {
+        let height = segment.from.distance(segment.to);
+        let angle = segment.from.angle_between(segment.to);
+        Self {
+            segment,
+            node: NodeBundle {
+                style: Style {
+                    width: Val::Px(1.),
+                    height: Val::Px(height),
+                    ..default()
+                },
+                ..default()
             },
         }
     }
@@ -57,8 +91,12 @@ pub struct TempConnectLine(pub Option<(Entity, ConnectionDirection)>);
 #[derive(Debug, Event, Clone, Copy, Default)]
 pub struct ConnectLine(pub Option<(Entity, ConnectionDirection)>);
 
+#[derive(Debug, Event, Clone)]
+pub struct SpawnSegments(pub Entity, pub Vec<Segment>);
+
 pub struct UiLinePlugin;
 
+// TODO: Implement focusable for lines
 impl UiLinePlugin {
     fn configure_line(mut gizmos_store: ResMut<GizmoConfigStore>) {
         let (line_config, _) = gizmos_store.config_mut::<LineGizmos>();
@@ -71,11 +109,10 @@ impl UiLinePlugin {
         curr_drag: Res<DragEntity>,
         mut writer: EventWriter<SpawnLineEvent>,
     ) {
-        if matches!(active_drawing.entity, None) {
+        if active_drawing.entity.is_none() {
             if let Some((curr_drag_entity, connector)) = curr_drag
                 .entity
-                .map(|entity| connectors.get(entity).ok())
-                .flatten()
+                .and_then(|entity| connectors.get(entity).ok())
             {
                 let bundle =
                     LineBundle::new(connector.fixture, connector.direction, curr_drag_entity);
@@ -120,7 +157,7 @@ impl UiLinePlugin {
         mut commands: Commands,
         parent: Query<(&Block, &Children)>,
         lines: Query<&UiLine>,
-        mut connectors: Query<&mut Visibility, With<Connector>>,
+        mut connectors: Query<(&Connector, &mut Visibility), With<Connector>>,
         mut active: ResMut<ActivelyDrawingLine>,
     ) {
         for &DeleteLine(deleted_entity) in reader.read() {
@@ -138,8 +175,10 @@ impl UiLinePlugin {
                 .get(line.from)
                 .expect("Expected the block to have children");
             for &child in children.iter() {
-                if let Ok(mut connector_visibility) = connectors.get_mut(child) {
-                    *connector_visibility = Visibility::Visible;
+                if let Ok((connector, mut connector_visibility)) = connectors.get_mut(child) {
+                    if connector.direction == line.from_direction {
+                        *connector_visibility = Visibility::Visible;
+                    }
                 }
             }
 
@@ -172,42 +211,128 @@ impl UiLinePlugin {
         }
     }
 
-    fn draw_line(
-        lines: Query<&UiLine>,
-        mut gizmos: Gizmos<LineGizmos>,
+    fn handle_segments(mut reader: EventReader<SpawnSegments>, mut commands: Commands) {
+        for SpawnSegments(line_entity, segments) in reader.read().map(ToOwned::to_owned) {
+            let mut line = commands.entity(line_entity);
+            line.despawn_descendants();
+            line.clear_children();
+            line.with_children(|parent| {
+                for segment in segments.into_iter() {
+                    parent.spawn(segment);
+                }
+            });
+        }
+    }
+
+    fn make_segments(
+        mut writer: EventWriter<SpawnSegments>,
+        lines: Query<(Entity, &UiLine)>,
         query: Query<(&Position, &Size)>,
+        changed_query: Query<(&Position, &Size), Or<(Changed<Position>, Changed<Size>)>>,
+    ) {
+        for (entity, line) in &lines {
+            let ((Position(from_pos), Size(from_size)), (Position(to_pos), Size(to_size))) =
+                if let Ok((&from_entity_pos, &from_entity_size)) = changed_query.get(line.from) {
+                    let (&to_pos, &to_size) = match changed_query.get(line.to).ok() {
+                        Some(to) => to,
+                        None => query.get(line.to).unwrap(),
+                    };
+                    ((from_entity_pos, from_entity_size), (to_pos, to_size))
+                } else if let Ok((&to_entity_pos, &to_entity_size)) = changed_query.get(line.to) {
+                    let (&from_pos, &from_size) = query.get(line.from).unwrap();
+                    ((from_pos, from_size), (to_entity_pos, to_entity_size))
+                } else {
+                    continue;
+                };
+
+            let segment_from_pos = from_pos + (from_size * (line.from_direction.get_vec() / 100.));
+            let segment_to_pos = to_pos + (to_size * (line.to_direction.get_vec() / 100.));
+
+            writer.send(SpawnSegments(
+                entity,
+                vec![Segment {
+                    from: segment_from_pos,
+                    to: segment_to_pos,
+                    owner: entity,
+                }],
+            ));
+        }
+    }
+
+    fn draw_line(
+        lines: Query<(&UiLine, &FocusColor, &Children)>,
+        segments: Query<&Segment>,
+        mut gizmos: Gizmos<LineGizmos>,
         background: Query<&Node, With<BackgroundBox>>,
     ) {
+        let background_size = background.single().size();
+        for (_, focus_color, children) in &lines {
+            for &child in children {
+                let Ok(segment) = segments.get(child) else {
+                    continue;
+                };
+                let segment_from =
+                    translate_vec_to_world(segment.from, background_size.y, background_size.x);
+                let segment_to =
+                    translate_vec_to_world(segment.to, background_size.y, background_size.x);
+
+                gizmos.line_2d(segment_from, segment_to, focus_color.0);
+            }
+        }
+    }
+
+    fn handle_connected_delete(
+        lines: Query<(Entity, &UiLine)>,
+        mut delete_reader: EventReader<DeleteEvent>,
+        mut writer: EventWriter<DeleteLine>,
+    ) {
+        for &DeleteEvent(deleted_entity) in delete_reader.read() {
+            let Some((line_entity, _)) = lines
+                .iter()
+                .find(|(_, line)| line.from == deleted_entity || line.to == deleted_entity)
+            else {
+                continue;
+            };
+
+            writer.send(DeleteLine(line_entity));
+        }
+    }
+
+    fn draw_debug_make_segements(
+        background: Query<&Node, With<BackgroundBox>>,
+        mut gizmos: Gizmos<LineGizmos>,
+        query: Query<(&Position, &Size)>,
+        lines: Query<&UiLine>,
+    ) {
+        let background_size = background.single().size();
         for line in &lines {
-            let background_size = background
-                .get_single()
-                .expect("Expect there to be only one background")
-                .size();
-
-            let (parent_pos, parent_size) = query
-                .get(line.from)
-                .expect("Expected Fixture to be in the world tree");
-
-            let (connector_pos, connector_size) = query
+            let (&Position(from_pos), &Size(from_size)) =
+                query.get(line.from).expect("Expected to be in world tree");
+            let (&Position(to_pos), &Size(to_size)) = query
                 .get(line.to)
-                .expect("Expected Connector to be in the world tree");
+                .expect("Expected to be in the world tree");
 
-            let mut from_pos = parent_pos.0
-                + (parent_size.0
-                    * Vec2::new(
-                        line.from_direction.get_left(),
-                        line.from_direction.get_top(),
-                    )
-                    / 100.);
+            let from_pos = translate_vec_to_world(from_pos, background_size.y, background_size.x)
+                + from_size * Vec2::new(0.5, -0.5);
+            let to_pos = translate_vec_to_world(to_pos, background_size.y, background_size.x)
+                + to_size * Vec2::new(0.5, -0.5);
+            let from_size = from_size + 40.;
+            let to_size = to_size + 40.;
 
-            let mut to_pos = connector_pos.0
-                + (connector_size.0
-                    * Vec2::new(line.to_direction.get_left(), line.to_direction.get_top())
-                    / 100.);
+            let from_connection_point =
+                from_pos + from_size * line.from_direction.get_center_vec() / 100.;
+            let to_connection_point = to_pos + to_size * line.to_direction.get_center_vec() / 100.;
 
-            from_pos = translate_vec_to_world(from_pos, background_size.y, background_size.x);
-            to_pos = translate_vec_to_world(to_pos, background_size.y, background_size.x);
-            gizmos.line_2d(from_pos, to_pos, Color::WHITE);
+            // Step 1
+            // Outer boundary rect
+            gizmos.rect_2d(from_pos, 0., from_size, Color::ALICE_BLUE);
+            gizmos.rect_2d(to_pos, 0., to_size, Color::ORANGE_RED);
+            gizmos.circle_2d(from_connection_point, 5., Color::ALICE_BLUE);
+            gizmos.circle_2d(to_connection_point, 5., Color::ORANGE_RED);
+
+            // Step 2
+            // Draw grid lines
+            // let grid
         }
     }
 }
@@ -220,17 +345,26 @@ impl Plugin for UiLinePlugin {
             .add_event::<DeleteLine>()
             .add_event::<TempConnectLine>()
             .add_event::<ConnectLine>()
+            .add_event::<SpawnSegments>()
             .add_systems(Startup, Self::configure_line)
             .add_systems(OnEnter(DragState::Started), Self::spawn_new_line)
             .add_systems(
                 Update,
                 (
-                    Self::handle_spawn_line,
-                    Self::handle_delete_line,
-                    Self::handle_temp_connect_line,
+                    (
+                        Self::handle_spawn_line,
+                        Self::handle_delete_line,
+                        Self::handle_temp_connect_line,
+                        Self::make_segments,
+                        Self::handle_segments,
+                        Self::draw_line,
+                    )
+                        .chain()
+                        .in_set(GameSets::Running),
+                    Self::handle_connected_delete.in_set(GameSets::Despawn),
                 ),
             )
             .add_systems(OnExit(DragState::Started), Self::handle_mouse_release)
-            .add_systems(Last, Self::draw_line);
+            .add_systems(Last, Self::draw_debug_make_segements);
     }
 }
