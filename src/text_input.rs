@@ -1,5 +1,5 @@
-use bevy::prelude::*;
-use bevy_simple_text_input::{TextInputBundle, TextInputInactive};
+use bevy::{prelude::*, ui::FocusPolicy};
+use bevy_simple_text_input::{TextInputBundle, TextInputInactive, TextInputSettings};
 
 use crate::{
     focus::{ActiveEntity, FocusBundle},
@@ -30,6 +30,7 @@ impl CustomTextInputBundle {
                     ..default()
                 },
                 border_color: Color::WHITE.into(),
+                focus_policy: FocusPolicy::Block,
                 ..default()
             },
             text_input_bundle,

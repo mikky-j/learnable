@@ -2,6 +2,9 @@
 mod size;
 // mod temp_line;
 
+use std::fs;
+
+use serde::{Deserialize, Serialize};
 pub use size::*;
 // pub use temp_line::*;
 
@@ -10,57 +13,109 @@ use bevy::{math::bounding::Aabb2d, prelude::*};
 use crate::connectors::ConnectionDirection;
 
 /// Expects the points to be top left aligned NOT CENTERED ALIGN
-pub fn get_grid(
-    (from_pos, from_size): (Vec2, Vec2),
-    (to_pos, to_size): (Vec2, Vec2),
-) -> [Vec2; 49] {
-    let from_rect = Rect::from_center_size(from_pos, from_size);
-    let to_rect = Rect::from_center_size(from_pos, from_size);
+// pub fn get_grid(
+//     (from_pos, from_size): (Vec2, Vec2),
+//     (to_pos, to_size): (Vec2, Vec2),
+// ) -> [Vec2; 49] {
+//     let from_rect = Rect::from_center_size(from_pos, from_size);
+//     let to_rect = Rect::from_center_size(from_pos, from_size);
+//
+//     let smallest_rect = match from_rect.min.min(to_rect.min) {
+//         x if x == from_rect.min => from_rect,
+//         _ => to_rect,
+//     };
+//
+//     [Vec2::default(); 49]
+// }
 
-    let smallest_rect = match from_rect.min.min(to_rect.min) {
-        x if x == from_rect.min => from_rect,
-        _ => to_rect,
-    };
+// #[derive(Debug, Clone, Copy)]
+// pub enum ConnectionType {
+//     Flow = 0,
+//     Left = 1,
+//     Right = 2,
+// }
+//
+// impl ConnectionType {
+//     pub const fn from_usize(input: usize) -> Option<Self> {
+//         let res = match input {
+//             0 => Self::Flow,
+//             1 => Self::Left,
+//             2 => Self::Right,
+//             _ => return None,
+//         };
+//
+//         Some(res)
+//     }
+//
+//     pub const fn get_color(self) -> Color {
+//         match self {
+//             Self::Flow => Color::YELLOW,
+//             Self::Left => Color::BLUE,
+//             Self::Right => Color::RED,
+//         }
+//     }
+// }
 
-    let grid = [Vec2::default(); 49];
+// #[derive(Default, Debug, Clone, Copy)]
+// #[non_exhaustive]
+// pub enum Shape {
+//     #[default]
+//     Rectangle,
+//     Diamond,
+// }
 
-    grid
+#[derive(Debug, Serialize, Deserialize)]
+pub enum HoleType {
+    Unit,
+    Any,
+    Number,
+    String,
+    Bool,
+    Comparitor,
+    Variable,
+    Type(String),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ConnectionType {
-    Flow = 0,
-    Left = 1,
-    Right = 2,
-}
-
-impl ConnectionType {
-    pub const fn from_usize(input: usize) -> Option<Self> {
-        let res = match input {
-            0 => Self::Flow,
-            1 => Self::Left,
-            2 => Self::Right,
-            _ => return None,
-        };
-
-        Some(res)
-    }
-
-    pub const fn get_color(self) -> Color {
+impl HoleType {
+    fn valid_input(&self, value: &str) -> bool {
+        if value.is_empty() {
+            return false;
+        }
         match self {
-            Self::Flow => Color::YELLOW,
-            Self::Left => Color::BLUE,
-            Self::Right => Color::RED,
+            HoleType::Number => value.parse::<u128>().is_ok() || value.parse::<f64>().is_ok(),
+            HoleType::String => true,
+            HoleType::Bool => value.eq("True") || value.eq("False"),
+            HoleType::Comparitor => matches!(value, ">" | "<" | "==" | "!="),
+            HoleType::Variable => {
+                matches!(value.chars().next().unwrap(), 'a'..='z' | 'A'..='Z' | '_')
+            }
+            _ => true,
         }
     }
 }
 
-#[derive(Default, Debug, Clone, Copy)]
-#[non_exhaustive]
-pub enum Shape {
-    #[default]
-    Rectangle,
-    Diamond,
+#[derive(Debug, Serialize, Deserialize, Component)]
+pub struct NewBlockType {
+    pub name: String,
+    pub language: String,
+    pub holes: Vec<HoleType>,
+    pub connectors: Vec<ConnectionDirection>,
+    pub template_string: String,
+    pub in_hole: bool,
+    pub value: HoleType,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Language {
+    pub blocks: Vec<NewBlockType>,
+}
+
+impl Language {
+    pub fn new() -> Self {
+        let file = fs::read_to_string("blocks/javascript.toml").unwrap();
+        let language: Language = toml::from_str(file.as_str()).unwrap();
+        language
+    }
 }
 
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -72,6 +127,7 @@ pub enum BlockType {
     If,
     Comparison,
     Start,
+    Print,
 }
 
 impl BlockType {
@@ -82,10 +138,12 @@ impl BlockType {
             BlockType::If => "if ({{1}}) { {{2}} } else { {{3}} }",
             BlockType::Comparison => "{{1}} {{2}} {{3}}",
             BlockType::Variable | BlockType::Text => "{{1}}",
+            BlockType::Print => "console.log(\"{{1}}\")",
             _ => "",
         }
     }
 
+    #[allow(unused)]
     pub const fn can_be_in_a_hole(&self) -> bool {
         match self {
             BlockType::Declaration => false,
@@ -94,6 +152,7 @@ impl BlockType {
             BlockType::If => false,
             BlockType::Comparison => true,
             BlockType::Start => false,
+            BlockType::Print => false,
         }
     }
 
@@ -103,7 +162,7 @@ impl BlockType {
             BlockType::Declaration => 2,
             BlockType::If => 1,
             BlockType::Comparison => 3,
-            BlockType::Text => 1,
+            BlockType::Text | BlockType::Variable | BlockType::Print => 1,
             _ => 0,
         }
     }
@@ -112,23 +171,16 @@ impl BlockType {
     pub const fn get_connectors(&self) -> usize {
         match self {
             BlockType::If => 3,
-            BlockType::Comparison | BlockType::Variable => 0,
+            BlockType::Comparison | BlockType::Variable | BlockType::Text => 0,
             _ => 1,
         }
     }
+}
 
-    #[inline]
-    pub fn to_string(&self) -> String {
-        let val = format!("{:?}", self);
-        val
-        // match self {
-        //     BlockType::Declaration => "Variable",
-        //     BlockType::If => "If",
-        //     BlockType::Start => "Start",
-        //     BlockType::Comparison => "Comparision",
-        //     BlockType::Variable => todo!(),
-        //     BlockType::Text => todo!(),
-        // }
+impl std::fmt::Display for BlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let val = format!("{self:?}");
+        val.fmt(f)
     }
 }
 
@@ -137,16 +189,19 @@ pub struct Position(pub Vec2);
 
 impl Position {
     #[inline]
+    #[allow(unused)]
     pub const fn x(&self) -> f32 {
         self.0.x
     }
 
     #[inline]
+    #[allow(unused)]
     pub const fn y(&self) -> f32 {
         self.0.y
     }
 }
 
+#[allow(unused)]
 pub fn log_transitions<T: States>(mut transitions: EventReader<StateTransitionEvent<T>>) {
     for transition in transitions.read() {
         info!(
@@ -156,6 +211,7 @@ pub fn log_transitions<T: States>(mut transitions: EventReader<StateTransitionEv
     }
 }
 
+#[allow(unused)]
 pub fn print_events<E: Event + std::fmt::Debug>(mut reader: EventReader<E>) {
     for event in reader.read() {
         info!("Event was fired: {event:?}");

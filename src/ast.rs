@@ -1,29 +1,57 @@
-use std::fmt::Display;
-
-use bevy::{
-    input::common_conditions::{input_just_pressed, input_just_released},
-    prelude::*,
-    utils::HashMap,
-};
+use bevy::{input::common_conditions::input_just_pressed, prelude::*, utils::HashMap};
 use bevy_simple_text_input::TextInputValue;
 
-use crate::{
-    focus::DragState,
-    text_input::TextInput,
-    ui_box::Hole,
-    utils::{BlockType, ConnectionType},
-    GameSets,
-};
+use crate::{text_input::TextInput, ui_box::Hole, utils::BlockType, GameSets};
 
-#[derive(Debug)]
-pub enum BlockData {
-    Hole(Entity, usize),
+#[derive(Debug, Clone)]
+pub struct BlockData {
+    block_type: BlockType,
+    data_type: BlockDataType,
+    position: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum BlockDataType {
+    Hole(Entity),
     Value(String),
 }
 
 #[derive(Debug, Resource, Default)]
 pub struct BlockDataMap {
     pub map: HashMap<Entity, Vec<BlockData>>,
+}
+
+impl BlockDataMap {
+    fn expand_holes(&self, block_entity: Entity, block_type: BlockType) -> String {
+        let Some(data) = self.map.get(&block_entity) else {
+            info!("Block {block_type:?} doesn't have an entry in the template string");
+            return block_type.get_template().into();
+        };
+        let mut data = data.clone();
+
+        // Make sure that the block is always sorted when we want to get the holes
+        data.sort_by(|data1, data2| data1.position.cmp(&data2.position));
+
+        let mut value = Vec::with_capacity(block_type.get_holes());
+
+        for data in data.iter().cloned() {
+            match data.data_type {
+                BlockDataType::Value(val) => value.push(val),
+                BlockDataType::Hole(entity) => {
+                    value.push(self.expand_holes(entity, data.block_type))
+                }
+            }
+        }
+
+        let mut template_string = block_type.get_template().to_owned();
+        for (index, value) in value.iter().enumerate() {
+            let index = index + 1;
+            template_string = template_string
+                .replacen(format!("{{{{{index}}}}}").as_str(), value, 1)
+                .to_owned();
+        }
+        template_string
+    }
 }
 
 fn get_block_data_hashmap(
@@ -47,7 +75,7 @@ fn get_block_data_hashmap(
             continue;
         };
 
-        match child_block {
+        let data_type = match child_block {
             BlockType::Text => {
                 let Some((_, text_value)) = text_input
                     .iter()
@@ -56,10 +84,17 @@ fn get_block_data_hashmap(
                     info!("Entity {child_entity:?} had a BlockType::Text but no TextInputValue");
                     continue;
                 };
-                value.push(BlockData::Value(text_value.0.clone()));
+                BlockDataType::Value(text_value.0.clone())
             }
-            _ => value.push(BlockData::Hole(child_entity, hole.order)),
-        }
+
+            _ => BlockDataType::Hole(child_entity),
+        };
+        let block_data = BlockData {
+            block_type: child_block.to_owned(),
+            data_type,
+            position: hole.order,
+        };
+        value.push(block_data);
     }
 
     let block_key = hashmap
@@ -75,166 +110,136 @@ fn get_block_data_hashmap(
 
 #[derive(Resource, Debug, Default)]
 pub struct Ast {
-    // pub map: HashMap<Entity, [Option<Entity>; 3]>,
-    pub map: HashMap<Entity, Vec<Option<Entity>>>,
-}
-
-#[derive(Debug)]
-pub struct Traverse {
-    entity: Entity,
-
-    flow: Option<Box<Traverse>>,
-    left: Option<Box<Traverse>>,
-    right: Option<Box<Traverse>>,
-}
-
-impl Traverse {
-    const fn get_default(entity: Entity) -> Self {
-        Self {
-            entity,
-            flow: None,
-            left: None,
-            right: None,
-        }
-    }
-
-    // fn print(&self, boxes: &Query<(Entity, &BlockType), With<crate::r#box::Box>>) -> String {
-    //     let mut result = String::with_capacity(256);
-    //
-    //     let (_, start_block_type) = boxes
-    //         .get(self.entity)
-    //         .expect("Expected box to be in the tree");
-    //
-    //     result.push_str(format!("( {start_block_type} ").as_str());
-    //
-    //     if let Some(left) = &self.left {
-    //         result.push_str(left.print(boxes).as_str());
-    //     }
-    //
-    //     if let Some(right) = &self.right {
-    //         result.push_str(right.print(boxes).as_str());
-    //     }
-    //
-    //     result.push_str(") ");
-    //
-    //     if let Some(flow) = &self.flow {
-    //         result.push_str(" -> ");
-    //         result.push_str(flow.print(boxes).as_str());
-    //     }
-    //     result
-    // }
-    //
-    fn set_val(&mut self, connection_type: ConnectionType, traverse: Self) {
-        match connection_type {
-            ConnectionType::Flow => self.flow = Some(Box::new(traverse)),
-            ConnectionType::Left => self.left = Some(Box::new(traverse)),
-            ConnectionType::Right => self.right = Some(Box::new(traverse)),
-        }
-    }
+    pub map: HashMap<Entity, [Option<(Entity, BlockType)>; 3]>,
+    // pub map: HashMap<Entity, Vec<Entity>>,
 }
 
 impl Ast {
-    pub fn traverse_tree(&self, start: Entity) -> Traverse {
-        let mut result = Traverse::get_default(start);
+    fn traverse_branch(
+        &self,
+        entity: Entity,
+        block_type: BlockType,
+        block_data_map: &BlockDataMap,
+    ) -> String {
+        // Expand the holes inside the block
+        let mut full_string = block_data_map.expand_holes(entity, block_type);
 
-        // Assume that all entities are in the tree
-        let start_d = self.map.get(&start).unwrap();
+        let hole = block_type.get_holes();
+        let Some(branches) = self.map.get(&entity) else {
+            return full_string;
+        };
 
-        for (index, &entity) in start_d.iter().enumerate() {
-            if let Some(entity) = entity {
-                result.set_val(
-                    ConnectionType::from_usize(index).expect("Index was not a connection type"),
-                    self.traverse_tree(entity),
-                );
+        // Expand the left and right branches
+        for (index, branch) in branches
+            .get(0..=1)
+            .unwrap()
+            .iter()
+            .filter(|x| x.is_some())
+            .enumerate()
+        {
+            match branch.to_owned() {
+                Some((branch_entity, branch_block_type)) => {
+                    let string =
+                        self.traverse_branch(branch_entity, branch_block_type, block_data_map);
+                    full_string = full_string.replacen(
+                        format!("{{{{{}}}}}", hole + index + 1).as_str(),
+                        string.as_str(),
+                        1,
+                    );
+                }
+                None => unreachable!("This should not be reachable"),
             }
         }
 
-        result
+        // Expand the flow branch
+        match branches.last().and_then(ToOwned::to_owned) {
+            Some((branch_entity, branch_block_type)) => {
+                let string = self.traverse_branch(branch_entity, branch_block_type, block_data_map);
+                format!("{full_string}\n{string}")
+            }
+            None => full_string,
+        }
     }
 }
 
-#[derive(Event, Debug, Clone, Copy)]
-pub struct AddToASTEvent {
-    pub parent: Option<Entity>,
-    pub child: Entity,
-    pub connection_type: ConnectionType,
+// TODO: Make specialized events for adding a child to a parent
+// and removing a child from a parent
+
+#[derive(Debug, Event, Clone, Copy)]
+pub struct AddToAst {
+    pub parent: Option<(Entity, usize)>,
+    pub child: (Entity, BlockType),
 }
 
-#[derive(Event, Debug, Clone, Copy)]
-pub struct RemoveFromAST {
-    pub parent: Option<Entity>,
-    pub child: Option<Entity>,
-    pub connection_type: ConnectionType,
+#[derive(Debug, Event, Clone, Copy)]
+pub struct RemoveFromAst {
+    pub parent: Option<(Entity, usize)>,
+    pub child: Entity,
 }
 
 pub struct ASTPlugin;
 
 impl ASTPlugin {
-    fn handle_add_to_ast(mut global_ast: ResMut<Ast>, mut add_event: EventReader<AddToASTEvent>) {
-        for &event in add_event.read() {
-            // Add the parent to the AST if it doesn't exist and say this is it's child
-            if let Some(parent) = event.parent {
-                let parent = global_ast.map.entry(parent).or_default();
-                parent[event.connection_type as usize] = Some(event.child);
-                // parent.push(events.child);
+    fn handle_add_to_ast(mut reader: EventReader<AddToAst>, mut ast: ResMut<Ast>) {
+        for event in reader.read() {
+            if let Some((parent, order)) = event.parent {
+                let value = ast.map.entry(parent).or_default();
+                value[order] = Some(event.child)
+            } else {
+                ast.map.entry(event.child.0).or_default();
             }
-            // Add the child to the AST if it doesn't exist
-            global_ast.map.entry(event.child).or_default();
         }
     }
 
-    fn handle_remove_from_ast(
-        mut global_ast: ResMut<Ast>,
-        mut remove_event: EventReader<RemoveFromAST>,
+    fn handle_remove_from_ast(mut reader: EventReader<RemoveFromAst>, mut ast: ResMut<Ast>) {
+        for event in reader.read() {
+            if let Some((parent, order)) = event.parent {
+                let value = ast.map.entry(parent).or_default();
+                value[order] = None;
+            } else {
+                ast.map.remove_entry(&event.child);
+            }
+        }
+    }
+
+    fn print_ast(
+        ast: Res<Ast>,
+        block_data_map: Res<BlockDataMap>,
+        block_type: Query<(Entity, &BlockType)>,
     ) {
-        for &event in remove_event.read() {
-            // Delete the child from the AST
-            if let Some(child) = event.child {
-                global_ast.map.remove(&child);
-            }
+        let Some((start_entity, &start_block)) = block_type
+            .iter()
+            .find(|(_, block_type)| matches!(block_type, BlockType::Start))
+        else {
+            info!("There is no start block in the world");
+            return;
+        };
+        let code = ast.traverse_branch(start_entity, start_block, block_data_map.as_ref());
+        info!("====== Outputed Code ======");
+        info!("{code}");
 
-            // Delete the child from the parent
-            if let Some(parent) = event.parent {
-                let parent_connections = global_ast.map.entry(parent).or_default();
-                parent_connections[event.connection_type as usize] = None;
-            }
-        }
+        // Stage 1: Get the template string for the block
+        // Stage 2: Explore any alternative branches. Repeat step 1 there too
+        // Stage 3: Explore the main flow branch
     }
-
-    // fn print_ast(
-    //     global_ast: Res<Ast>,
-    //     boxes: Query<(Entity, &BlockType), With<crate::r#box::Box>>,
-    // ) {
-    //     let Some(start) = boxes
-    //         .iter()
-    //         .find(|&(_, block_type)| *block_type == BlockType::Start)
-    //         .map(|(e, _)| e)
-    //     else {
-    //         return;
-    //     };
-    //     let traverse = global_ast.traverse_tree(start);
-    //     info!("{}", traverse.print(&boxes));
-    // }
 }
 
 impl Plugin for ASTPlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
         app.init_resource::<Ast>()
             .init_resource::<BlockDataMap>()
-            .add_event::<AddToASTEvent>()
-            .add_event::<RemoveFromAST>()
+            .add_event::<AddToAst>()
+            .add_event::<RemoveFromAst>()
             .add_systems(
                 Update,
                 (
-                    get_block_data_hashmap.run_if(input_just_pressed(KeyCode::KeyP))
-                    // Self::handle_add_to_ast,
-                    // Self::handle_remove_from_ast,
-                    // Self::print_ast.run_if(
-                    //     in_state(DragState::Ended).and_then(input_just_released(KeyCode::KeyP)),
-                    // ),
+                    get_block_data_hashmap.run_if(input_just_pressed(KeyCode::KeyP)),
+                    Self::handle_add_to_ast,
+                    Self::handle_remove_from_ast,
+                    Self::print_ast.run_if(input_just_pressed(KeyCode::KeyQ)),
                 )
-                .chain()
-                .in_set(GameSets::Running),
+                    .chain()
+                    .in_set(GameSets::Running),
             );
     }
 }

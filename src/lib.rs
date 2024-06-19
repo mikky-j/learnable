@@ -7,9 +7,10 @@
 mod ast;
 //
 // mod r#box;
+mod camera;
 mod connectors;
 // mod line;
-mod collision;
+// mod collision;
 mod focus;
 mod text_input;
 mod ui_box;
@@ -19,7 +20,10 @@ mod utils;
 use bevy::{app::PluginGroupBuilder, prelude::*, window::PresentMode};
 use ui_line::UiLinePlugin;
 
-use crate::{focus::FocusPlugin, text_input::CustomTextInputPlugin, ui_box::UIBoxPlugin};
+use crate::{
+    camera::CameraPlugin, focus::FocusPlugin, text_input::CustomTextInputPlugin,
+    ui_box::UIBoxPlugin,
+};
 use connectors::ConnectorPlugin;
 // use line::LinePlugin;
 // use r#box::BoxPlugin;
@@ -32,6 +36,15 @@ pub const WINDOW_WIDTH: f32 = 600.;
 
 pub const WHITE: Color = Color::rgb(255., 255., 255.);
 pub const RED: Color = Color::rgb(255., 0., 0.);
+
+// pub fn input_just_pressed_with_modifier<T>(
+//     input: T,
+// ) -> impl FnMut(Res<ButtonInput<T>>) -> bool + Clone
+// where
+//     T: Copy + Eq + std::hash::Hash + Send + Sync + 'static,
+// {
+//     move |inputs: Res<ButtonInput<T>>| inputs.get_just_pressed(KeyCode::ShiftLeft)
+// }
 
 pub fn get_default_plugins() -> PluginGroupBuilder {
     DefaultPlugins.set(WindowPlugin {
@@ -99,7 +112,6 @@ impl GamePlugin {
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, (GameSets::Despawn, GameSets::Running).chain())
-            .add_systems(Startup, Self::spawn_camera)
             .add_systems(
                 Update,
                 apply_deferred
@@ -115,6 +127,7 @@ impl Plugin for GamePlugin {
             .add_plugins(ASTPlugin)
             .add_plugins(UIBoxPlugin)
             .add_plugins(CustomTextInputPlugin)
+            .add_plugins(CameraPlugin)
             .add_plugins(ConnectorPlugin);
     }
 }

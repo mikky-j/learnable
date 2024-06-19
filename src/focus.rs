@@ -1,13 +1,10 @@
 use bevy::{
-    input::common_conditions::{input_just_pressed, input_just_released, input_pressed},
+    input::common_conditions::{input_just_pressed, input_just_released},
     prelude::*,
+    ui::FocusPolicy,
 };
 
-use crate::{
-    ui_line::Segment,
-    utils::{point_line_collision, print_events},
-    DeleteEvent, EntityLabel, GameSets,
-};
+use crate::{ui_line::Segment, utils::point_line_collision, DeleteEvent, GameSets};
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Focus {
@@ -117,20 +114,32 @@ pub struct FocusPlugin;
 
 impl FocusPlugin {
     fn handle_interaction(
+        focus_policy: Query<&FocusPolicy>,
         interactions: Query<(Entity, &Interaction), (Changed<Interaction>, With<Focus>)>,
         // labels: Query<&EntityLabel>,
         mut select_writer: EventWriter<SelectEvent>,
         mut hover_writer: EventWriter<HoverEvent>,
     ) {
         for (entity, &interaction) in &interactions {
-            // let label = labels.get(entity).unwrap_or_default();
+            // let label = labels
+            //     .get(entity)
+            //     .map(ToOwned::to_owned)
+            //     .unwrap_or_default();
+            if focus_policy
+                .get(entity)
+                .ok()
+                .is_some_and(|policy| matches!(policy, FocusPolicy::Pass))
+            {
+                info!("Encountered weird bevy bug");
+                continue;
+            }
             match interaction {
                 Interaction::Pressed => {
                     // info!("{} was selected", label.0);
                     select_writer.send(SelectEvent(Some(entity)));
                 }
                 Interaction::Hovered => {
-                    // info!("{} was hovered", label.0);
+                    // info!("{} {entity:?} was hovered", label.0);
                     hover_writer.send(HoverEvent(Some(entity)));
                 }
                 Interaction::None => (),
@@ -230,7 +239,6 @@ impl FocusPlugin {
 
     fn handle_drag_state_transitions(
         mut transitions: EventReader<StateTransitionEvent<DragState>>,
-        global_translation: Query<&GlobalTransform>,
         hover: Query<&Interaction, With<Draggable>>,
         active: Res<ActiveEntity>,
         mut drag: ResMut<DragEntity>,
@@ -241,13 +249,6 @@ impl FocusPlugin {
                     if let Some(entity) = active.entity {
                         if hover.get(entity).expect("Should never fail") == &Interaction::Pressed {
                             drag.entity = Some(entity);
-                            // drag.drag_start = Some(
-                            //     global_translation
-                            //         .get(entity)
-                            //         .expect("All entities should have a global translation right?")
-                            //         .translation()
-                            //         .xy(),
-                            // );
                         }
                     }
                 }
@@ -277,10 +278,8 @@ impl FocusPlugin {
 
     fn handle_focus_line(
         query: Query<&Segment>,
-        mouse_button_input: Res<ButtonInput<MouseButton>>,
         mut cursor_motion: EventReader<CursorMoved>,
         mut hover_writer: EventWriter<HoverEvent>,
-        mut select_writer: EventWriter<SelectEvent>,
     ) {
         for segments in &query {
             for motion in cursor_motion.read() {

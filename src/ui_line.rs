@@ -1,11 +1,12 @@
 use bevy::prelude::*;
 
 use crate::{
+    ast::{AddToAst, RemoveFromAst},
     connectors::{ConnectionDirection, Connector},
     focus::{DragEntity, DragState, FocusColor, LineFocusBundle},
     translate_vec_to_world,
     ui_box::{BackgroundBox, Block},
-    utils::{Position, Size},
+    utils::{BlockType, Position, Size},
     DeleteEvent, GameSets,
 };
 
@@ -54,9 +55,9 @@ pub struct SegmentBundle {
 }
 
 impl SegmentBundle {
-    pub fn new(segment: Segment) -> Self {
+    pub fn _new(segment: Segment) -> Self {
         let height = segment.from.distance(segment.to);
-        let angle = segment.from.angle_between(segment.to);
+        let _angle = segment.from.angle_between(segment.to);
         Self {
             segment,
             node: NodeBundle {
@@ -127,6 +128,10 @@ impl UiLinePlugin {
         connectors: Query<&Connector>,
         lines: Query<&UiLine>,
         mut connect_writer: EventWriter<ConnectLine>,
+        mut add_to_ast_writer: EventWriter<AddToAst>,
+
+        // TODO: Once implemented the specialized AST event, remove this ASAP
+        block_type: Query<&BlockType>,
     ) {
         if let Some(entity) = active_drawing.entity {
             let line = lines
@@ -136,6 +141,11 @@ impl UiLinePlugin {
                 delete_writer.send(DeleteLine(entity));
             } else {
                 connect_writer.send(ConnectLine(Some((line.to, line.to_direction))));
+                let &block_type = block_type.get(line.to).unwrap();
+                add_to_ast_writer.send(AddToAst {
+                    parent: Some((line.from, line.from_direction.get_parse_order())),
+                    child: (line.to, block_type),
+                });
             }
             active_drawing.entity = None;
         }
@@ -166,18 +176,17 @@ impl UiLinePlugin {
                 continue;
             };
 
-            // Make connector visibile
+            // INFO: Make connector visible if it has not despawned yet
             let line = lines
                 .get(deleted_entity)
                 .expect("Expected the line to be deleted");
 
-            let (_, children) = parent
-                .get(line.from)
-                .expect("Expected the block to have children");
-            for &child in children.iter() {
-                if let Ok((connector, mut connector_visibility)) = connectors.get_mut(child) {
-                    if connector.direction == line.from_direction {
-                        *connector_visibility = Visibility::Visible;
+            if let Ok((_, children)) = parent.get(line.from) {
+                for &child in children {
+                    if let Ok((connector, mut connector_visibility)) = connectors.get_mut(child) {
+                        if connector.direction == line.from_direction {
+                            *connector_visibility = Visibility::Visible;
+                        }
                     }
                 }
             }
@@ -284,17 +293,21 @@ impl UiLinePlugin {
     fn handle_connected_delete(
         lines: Query<(Entity, &UiLine)>,
         mut delete_reader: EventReader<DeleteEvent>,
-        mut writer: EventWriter<DeleteLine>,
+        mut delete_line_writer: EventWriter<DeleteLine>,
+        mut remove_from_ast_writer: EventWriter<RemoveFromAst>,
     ) {
         for &DeleteEvent(deleted_entity) in delete_reader.read() {
-            let Some((line_entity, _)) = lines
+            for (line_entity, line) in lines
                 .iter()
-                .find(|(_, line)| line.from == deleted_entity || line.to == deleted_entity)
-            else {
-                continue;
-            };
+                .filter(|(_, line)| line.from == deleted_entity || line.to == deleted_entity)
+            {
+                remove_from_ast_writer.send(RemoveFromAst {
+                    parent: Some((line.from, line.from_direction.get_parse_order())),
+                    child: line.to,
+                });
 
-            writer.send(DeleteLine(line_entity));
+                delete_line_writer.send(DeleteLine(line_entity));
+            }
         }
     }
 
@@ -364,7 +377,7 @@ impl Plugin for UiLinePlugin {
                     Self::handle_connected_delete.in_set(GameSets::Despawn),
                 ),
             )
-            .add_systems(OnExit(DragState::Started), Self::handle_mouse_release)
-            .add_systems(Last, Self::draw_debug_make_segements);
+            .add_systems(OnExit(DragState::Started), Self::handle_mouse_release);
+        // .add_systems(Last, Self::draw_debug_make_segements);
     }
 }

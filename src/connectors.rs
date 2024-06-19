@@ -1,14 +1,15 @@
 use bevy::{math::bounding::BoundingVolume, prelude::*};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     focus::{ActiveEntity, DragEntity, DragState, Draggable, FocusColor, InteractionFocusBundle},
     ui_box::Block,
     ui_line::{ConnectLine, TempConnectLine},
-    utils::{get_aabb2d, get_relative_direction, ConnectionType, Position, Size},
+    utils::{get_aabb2d, get_relative_direction, Position, Size},
     GameSets,
 };
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionDirection {
     Left,
     Right,
@@ -30,6 +31,16 @@ impl ConnectionDirection {
             }
         };
         Some(dir)
+    }
+
+    pub const fn get_parse_order(&self) -> usize {
+        match self {
+            ConnectionDirection::Left => 0,
+            ConnectionDirection::Right => 1,
+            ConnectionDirection::Bottom => 2,
+            ConnectionDirection::Top => 3,
+            ConnectionDirection::Center => 4,
+        }
     }
 
     pub const fn get_top(&self) -> f32 {
@@ -132,7 +143,7 @@ impl ConnectorBundle {
 pub struct Connector {
     pub fixture: Entity,
     pub direction: ConnectionDirection,
-    pub connection_type: ConnectionType,
+    // pub connection_type: ConnectionType,
     pub connected: bool,
 }
 
@@ -196,7 +207,6 @@ impl ConnectorPlugin {
                 .read()
                 .map(|motion| motion.delta.unwrap_or_default())
             {
-                info!("I ran in move_connector_according_to_mouse");
                 let transform = Transform::default().with_translation(delta.extend(0.));
                 *global = global.mul_transform(transform);
             }
