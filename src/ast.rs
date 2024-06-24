@@ -1,16 +1,18 @@
 use bevy::{input::common_conditions::input_just_pressed, prelude::*, utils::HashMap};
+use bevy_http_client::prelude::*;
 use bevy_simple_text_input::TextInputValue;
+use serde::{Deserialize, Serialize};
 
-use crate::{text_input::TextInput, ui_box::Hole, utils::BlockType, GameSets};
+use crate::{text_input::TextInput, ui_box::Hole, utils::BlockType, ErrorEvent, GameSets};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockData {
     block_type: BlockType,
     data_type: BlockDataType,
     position: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BlockDataType {
     Hole(Entity),
     Value(String),
@@ -22,35 +24,42 @@ pub struct BlockDataMap {
 }
 
 impl BlockDataMap {
-    fn expand_holes(&self, block_entity: Entity, block_type: BlockType) -> String {
+    fn expand_holes(&self, block_entity: Entity, block_type: BlockType) -> Result<String, String> {
         let Some(data) = self.map.get(&block_entity) else {
-            info!("Block {block_type:?} doesn't have an entry in the template string");
-            return block_type.get_template().into();
+            info!("Block {block_type} doesn't have an entry in the template string");
+            return Ok(block_type.get_template());
         };
         let mut data = data.clone();
 
         // Make sure that the block is always sorted when we want to get the holes
         data.sort_by(|data1, data2| data1.position.cmp(&data2.position));
 
-        let mut value = Vec::with_capacity(block_type.get_holes());
+        let mut value: Vec<String> = Vec::with_capacity(block_type.get_holes());
 
-        for data in data.iter().cloned() {
+        for (index, data) in data.iter().cloned().enumerate() {
             match data.data_type {
-                BlockDataType::Value(val) => value.push(val),
+                BlockDataType::Value(val) => {
+                    if block_type.holes[index].valid_input(val.as_str()) {
+                        value.push(val)
+                    } else {
+                        return Err(format!("Couldn't expand hole {index} for {block_type}"));
+                    }
+                }
                 BlockDataType::Hole(entity) => {
-                    value.push(self.expand_holes(entity, data.block_type))
+                    let val = self.expand_holes(entity, data.block_type)?;
+                    value.push(val);
                 }
             }
         }
 
         let mut template_string = block_type.get_template().to_owned();
-        for (index, value) in value.iter().enumerate() {
+        for (index, value) in value.into_iter().enumerate() {
             let index = index + 1;
-            template_string = template_string
-                .replacen(format!("{{{{{index}}}}}").as_str(), value, 1)
-                .to_owned();
+            template_string
+                .replacen(format!("{{{{{index}}}}}").as_str(), value.as_str(), 1)
+                .clone_into(&mut template_string);
         }
-        template_string
+        Ok(template_string)
     }
 }
 
@@ -76,7 +85,7 @@ fn get_block_data_hashmap(
         };
 
         let data_type = match child_block {
-            BlockType::Text => {
+            block_type if block_type.name == "Text" => {
                 let Some((_, text_value)) = text_input
                     .iter()
                     .find(|(text_input, _)| text_input.owner == child_entity)
@@ -90,7 +99,7 @@ fn get_block_data_hashmap(
             _ => BlockDataType::Hole(child_entity),
         };
         let block_data = BlockData {
-            block_type: child_block.to_owned(),
+            block_type: child_block.clone(),
             data_type,
             position: hole.order,
         };
@@ -118,15 +127,15 @@ impl Ast {
     fn traverse_branch(
         &self,
         entity: Entity,
-        block_type: BlockType,
+        block_type: &BlockType,
         block_data_map: &BlockDataMap,
-    ) -> String {
+    ) -> Result<String, String> {
         // Expand the holes inside the block
-        let mut full_string = block_data_map.expand_holes(entity, block_type);
+        let mut full_string = block_data_map.expand_holes(entity, block_type.clone())?;
 
         let hole = block_type.get_holes();
         let Some(branches) = self.map.get(&entity) else {
-            return full_string;
+            return Ok(full_string);
         };
 
         // Expand the left and right branches
@@ -140,7 +149,7 @@ impl Ast {
             match branch.to_owned() {
                 Some((branch_entity, branch_block_type)) => {
                     let string =
-                        self.traverse_branch(branch_entity, branch_block_type, block_data_map);
+                        self.traverse_branch(branch_entity, &branch_block_type, block_data_map)?;
                     full_string = full_string.replacen(
                         format!("{{{{{}}}}}", hole + index + 1).as_str(),
                         string.as_str(),
@@ -154,10 +163,11 @@ impl Ast {
         // Expand the flow branch
         match branches.last().and_then(ToOwned::to_owned) {
             Some((branch_entity, branch_block_type)) => {
-                let string = self.traverse_branch(branch_entity, branch_block_type, block_data_map);
-                format!("{full_string}\n{string}")
+                let string =
+                    self.traverse_branch(branch_entity, &branch_block_type, block_data_map)?;
+                Ok(format!("{full_string}\n{string}"))
             }
-            None => full_string,
+            None => Ok(full_string),
         }
     }
 }
@@ -165,13 +175,13 @@ impl Ast {
 // TODO: Make specialized events for adding a child to a parent
 // and removing a child from a parent
 
-#[derive(Debug, Event, Clone, Copy)]
+#[derive(Debug, Event, Clone)]
 pub struct AddToAst {
     pub parent: Option<(Entity, usize)>,
     pub child: (Entity, BlockType),
 }
 
-#[derive(Debug, Event, Clone, Copy)]
+#[derive(Debug, Event, Clone)]
 pub struct RemoveFromAst {
     pub parent: Option<(Entity, usize)>,
     pub child: Entity,
@@ -181,12 +191,12 @@ pub struct ASTPlugin;
 
 impl ASTPlugin {
     fn handle_add_to_ast(mut reader: EventReader<AddToAst>, mut ast: ResMut<Ast>) {
-        for event in reader.read() {
-            if let Some((parent, order)) = event.parent {
+        for AddToAst { parent, child } in reader.read().map(ToOwned::to_owned) {
+            if let Some((parent, order)) = parent {
                 let value = ast.map.entry(parent).or_default();
-                value[order] = Some(event.child)
+                value[order] = Some(child)
             } else {
-                ast.map.entry(event.child.0).or_default();
+                ast.map.entry(child.0).or_default();
             }
         }
     }
@@ -206,22 +216,57 @@ impl ASTPlugin {
         ast: Res<Ast>,
         block_data_map: Res<BlockDataMap>,
         block_type: Query<(Entity, &BlockType)>,
+        mut error_writer: EventWriter<ErrorEvent>,
+        mut request_writer: EventWriter<TypedRequest<()>>,
     ) {
-        let Some((start_entity, &start_block)) = block_type
+        let Some((start_entity, start_block)) = block_type
             .iter()
-            .find(|(_, block_type)| matches!(block_type, BlockType::Start))
+            .find(|(_, block_type)| block_type.name == "Start")
         else {
             info!("There is no start block in the world");
             return;
         };
-        let code = ast.traverse_branch(start_entity, start_block, block_data_map.as_ref());
+        let code = match ast.traverse_branch(start_entity, start_block, block_data_map.as_ref()) {
+            Ok(code) => code,
+            Err(error) => {
+                error_writer.send(ErrorEvent(error));
+                return;
+            }
+        };
         info!("====== Outputed Code ======");
         info!("{code}");
+
+        request_writer.send(
+            HttpClient::new()
+                .post("http://localhost:3000/code")
+                .json(&Code { code })
+                .with_type::<()>(),
+        );
+
+        // let thread_pool = AsyncComputeTaskPool::get();
+        // let mut task = thread_pool.spawn(async move {
+        //     reqwest::Client::new()
+        //         .post("http://localhost:3000/code")
+        //         .json(&Code { code })
+        //         .send()
+        //         .await
+        // });
 
         // Stage 1: Get the template string for the block
         // Stage 2: Explore any alternative branches. Repeat step 1 there too
         // Stage 3: Explore the main flow branch
     }
+
+    fn handle_response(mut reader: EventReader<TypedResponse<()>>) {
+        for response in reader.read() {
+            println!("Recieved response");
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Code {
+    code: String,
 }
 
 impl Plugin for ASTPlugin {
@@ -230,6 +275,8 @@ impl Plugin for ASTPlugin {
             .init_resource::<BlockDataMap>()
             .add_event::<AddToAst>()
             .add_event::<RemoveFromAst>()
+            .add_plugins(HttpClientPlugin)
+            .register_request_type::<()>()
             .add_systems(
                 Update,
                 (
@@ -237,6 +284,7 @@ impl Plugin for ASTPlugin {
                     Self::handle_add_to_ast,
                     Self::handle_remove_from_ast,
                     Self::print_ast.run_if(input_just_pressed(KeyCode::KeyQ)),
+                    Self::handle_response,
                 )
                     .chain()
                     .in_set(GameSets::Running),

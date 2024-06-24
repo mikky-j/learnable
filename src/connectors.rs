@@ -232,7 +232,6 @@ impl ConnectorPlugin {
             .entity
             .and_then(|entity| connectors.get_mut(entity).ok())
         {
-            info!("I ran in reset");
             let old_pos = active.drag_start.unwrap().extend(0.);
             let new_pos = old_pos - global_connector.translation();
 

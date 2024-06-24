@@ -1,11 +1,12 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ast::{AddToAst, RemoveFromAst},
     connectors::{ConnectionDirection, Connector},
     focus::{DragEntity, DragState, FocusColor, LineFocusBundle},
     translate_vec_to_world,
-    ui_box::{BackgroundBox, Block},
+    ui_box::{Arg, BackgroundBox, Block},
     utils::{BlockType, Position, Size},
     DeleteEvent, GameSets,
 };
@@ -17,7 +18,7 @@ pub struct Segment {
     pub owner: Entity,
 }
 
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct UiLine {
     pub from: Entity,
     /// The direction we are coming from
@@ -131,7 +132,7 @@ impl UiLinePlugin {
         mut add_to_ast_writer: EventWriter<AddToAst>,
 
         // TODO: Once implemented the specialized AST event, remove this ASAP
-        block_type: Query<&BlockType>,
+        block_type: Query<&BlockType, Without<Arg>>,
     ) {
         if let Some(entity) = active_drawing.entity {
             let line = lines
@@ -141,10 +142,10 @@ impl UiLinePlugin {
                 delete_writer.send(DeleteLine(entity));
             } else {
                 connect_writer.send(ConnectLine(Some((line.to, line.to_direction))));
-                let &block_type = block_type.get(line.to).unwrap();
+                let block_type = block_type.get(line.to).unwrap();
                 add_to_ast_writer.send(AddToAst {
                     parent: Some((line.from, line.from_direction.get_parse_order())),
-                    child: (line.to, block_type),
+                    child: (line.to, block_type.to_owned()),
                 });
             }
             active_drawing.entity = None;

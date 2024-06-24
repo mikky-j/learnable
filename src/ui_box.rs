@@ -7,14 +7,14 @@ use bevy_simple_text_input::{TextInputBundle, TextInputPlugin};
 
 use crate::{
     ast::{AddToAst, RemoveFromAst},
-    connectors::{ConnectionDirection, Connector, SpawnConnector},
+    connectors::{Connector, SpawnConnector},
     focus::{
         ActiveEntity, DragEntity, DragState, Draggable, FocusColor, HoverEntity,
         InteractionFocusBundle,
     },
     text_input::CustomTextInputBundle,
-    utils::{BlockType, Language, Position, Size},
-    DeleteEvent, EntityLabel, GameSets,
+    utils::{BlockType, HoleType, Language, Position, Size},
+    DeleteEvent, EntityLabel, ErrorEvent, GameSets,
 };
 
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -55,7 +55,7 @@ impl BackgroundBoxBundle {
 pub struct Block;
 
 #[derive(Bundle, Debug, Clone, Default)]
-struct BlockBundle {
+pub struct BlockBundle {
     marker: (Block, UIBox),
     position: Position,
     size: Size,
@@ -67,35 +67,7 @@ struct BlockBundle {
 }
 
 impl BlockBundle {
-    fn _new_with_parent(
-        size: Size,
-        focus_bundle: InteractionFocusBundle,
-        block_type: BlockType,
-    ) -> Self {
-        Self {
-            node: NodeBundle {
-                style: Style {
-                    min_width: Val::Px(size.width()),
-                    flex_direction: FlexDirection::Column,
-                    min_height: Val::Px(size.height()),
-                    border: UiRect::all(Val::Px(1.)),
-                    padding: UiRect::all(Val::Px(4.)),
-                    ..default()
-                },
-                background_color: BackgroundColor(Color::rgba(0., 0., 0., 0.)),
-                border_color: BorderColor(Color::WHITE),
-                focus_policy: bevy::ui::FocusPolicy::Block,
-                ..default()
-            },
-            size,
-            focus_bundle,
-            block_type,
-            label: EntityLabel::new("Block"),
-            ..default()
-        }
-    }
-
-    fn new(
+    pub fn new(
         x: f32,
         y: f32,
         w: f32,
@@ -103,6 +75,7 @@ impl BlockBundle {
         focus_bundle: InteractionFocusBundle,
         block_type: BlockType,
     ) -> Self {
+        let color = block_type.concept_type.get_color();
         Self {
             draggable: Draggable,
             marker: (Block, UIBox),
@@ -122,12 +95,47 @@ impl BlockBundle {
                     padding: UiRect::all(Val::Px(4.)),
                     ..default()
                 },
-                background_color: BackgroundColor(Color::rgba(0., 0., 0., 0.)),
-                border_color: BorderColor(Color::WHITE),
+                background_color: BackgroundColor(color),
+                border_color: BorderColor(Color::rgba_u8(0, 0, 0, 0)),
                 focus_policy: bevy::ui::FocusPolicy::Block,
                 ..default()
             },
             focus_bundle,
+        }
+    }
+}
+
+#[derive(Debug, Component)]
+pub struct ErrorBox;
+
+#[derive(Bundle)]
+pub struct ErrorBoxBundle {
+    node: TextBundle,
+    marker: (UIBox, ErrorBox),
+}
+
+impl ErrorBoxBundle {
+    pub fn new(error: String) -> Self {
+        Self {
+            node: TextBundle {
+                text: Text::from_section(
+                    error,
+                    TextStyle {
+                        color: Color::WHITE,
+                        ..default()
+                    },
+                ),
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(0.),
+                    top: Val::Px(0.),
+                    padding: UiRect::all(Val::Px(8.)),
+                    ..default()
+                },
+                background_color: Color::RED.into(),
+                ..default()
+            },
+            marker: (UIBox, ErrorBox),
         }
     }
 }
@@ -166,6 +174,7 @@ impl HoleContainerBundle {
 pub struct Hole {
     pub owner: Entity,
     pub order: usize,
+    pub hole_type: HoleType,
 }
 
 #[derive(Bundle)]
@@ -177,10 +186,14 @@ struct HoleBundle {
 }
 
 impl HoleBundle {
-    fn new(owner: Entity, order: usize) -> Self {
+    fn new(owner: Entity, order: usize, hole_type: HoleType) -> Self {
         Self {
             label: EntityLabel::new("Hole"),
-            hole: Hole { owner, order },
+            hole: Hole {
+                owner,
+                order,
+                hole_type,
+            },
             node: NodeBundle {
                 style: Style {
                     padding: UiRect::all(Val::Px(4.)),
@@ -199,19 +212,21 @@ impl HoleBundle {
 }
 
 #[derive(Debug, Component, Clone)]
-struct Arg;
+pub struct Arg {
+    pub owner: Entity,
+    pub order: usize,
+}
 
 #[derive(Event, Debug, Clone)]
-struct SpawnUIBox {
-    bundle: BlockBundle,
-    parent: Option<Entity>,
-    // connections: [Option<ConnectionType>; 3],
+pub struct SpawnUIBox {
+    pub bundle: BlockBundle,
+    pub marker: Option<crate::Marker>, // connections: [Option<ConnectionType>; 3],
 }
 
 #[derive(Event, Debug, Clone, Copy)]
-struct SpawnArg {
-    arg: Entity,
-    parent: Entity,
+pub struct SpawnArg {
+    pub arg: Entity,
+    pub parent: Entity,
 }
 
 // #[derive(Resource, Debug, Default)]
@@ -234,6 +249,8 @@ impl UIBoxPlugin {
         mut writer: EventWriter<SpawnUIBox>,
         background: Query<(Entity, &Node), With<BackgroundBox>>,
         active: Res<ActiveEntity>,
+        language: Res<Language>,
+        mut error_writer: EventWriter<ErrorEvent>,
     ) {
         let (background_entity, background) = background.single();
         // if the active entity is the background entity then we can spawn a box
@@ -245,40 +262,48 @@ impl UIBoxPlugin {
             for keyboard_event in keyboard_events.read() {
                 if keyboard_event.state == ButtonState::Pressed {
                     let block_type = match keyboard_event.key_code {
-                        KeyCode::KeyS => BlockType::Declaration,
-                        KeyCode::KeyD => BlockType::If,
-                        KeyCode::KeyC => BlockType::Comparison,
-                        KeyCode::KeyT => BlockType::Text,
-                        KeyCode::KeyV => BlockType::Variable,
-                        KeyCode::KeyB => BlockType::Print,
+                        KeyCode::KeyS => "Declaration",
+                        KeyCode::KeyD => "If",
+                        KeyCode::KeyC => "Comparitor",
+                        KeyCode::KeyT => "Text",
+                        KeyCode::KeyV => "Variable",
+                        KeyCode::KeyB => "Print",
                         _ => continue,
                     };
+                    let Some(block_type) = language.get_block(block_type) else {
+                        error_writer.send(ErrorEvent(format!(
+                            "Couldn't spawn {block_type} for language"
+                        )));
+                        continue;
+                    };
                     writer.send(SpawnUIBox {
-                        parent: None,
                         bundle: BlockBundle::new(
                             background_size.x,
                             background_size.y,
                             40.,
                             40.,
-                            InteractionFocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+                            InteractionFocusBundle::default(),
                             block_type,
                         ),
+                        marker: None,
                     });
                 }
             }
         }
     }
 
-    fn spawn_initial_box(mut writer: EventWriter<SpawnUIBox>) {
+    fn spawn_initial_box(mut writer: EventWriter<SpawnUIBox>, language: Res<Language>) {
+        let start_block = language.get_block("Start").unwrap();
+
         writer.send(SpawnUIBox {
-            parent: None,
+            marker: None,
             bundle: BlockBundle::new(
                 0.,
                 0.,
                 40.,
                 40.,
-                InteractionFocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
-                BlockType::Start,
+                InteractionFocusBundle::default(),
+                start_block,
             ),
         });
     }
@@ -291,47 +316,44 @@ impl UIBoxPlugin {
         background: Query<Entity, With<BackgroundBox>>,
     ) {
         for SpawnUIBox {
-            parent,
             bundle,
+            marker,
             // connections,
         } in reader.read().map(ToOwned::to_owned)
         {
-            let mut container = if let Some(parent) = parent {
-                let mut commands = commands
-                    .get_entity(parent)
-                    .expect("Expected parent to be in the world tree");
-                commands.despawn_descendants();
-                commands
-            } else {
-                let background = commands
-                    .get_entity(background.single())
-                    .expect("Should never fail");
-                background
-            };
+            let mut container = commands
+                .get_entity(background.single())
+                .expect("Should never fail");
 
             container.with_children(|parent_commands| {
-                let block_type = bundle.block_type;
                 let text = bundle.block_type.to_string();
                 let holes = bundle.block_type.get_holes();
-                let connections = bundle.block_type.get_connectors();
+                let block_type = bundle.block_type.clone();
+                let connections = block_type.connectors.clone();
 
-                let mut ui_box = if parent.is_some() {
-                    parent_commands.spawn((bundle, Arg))
-                } else {
-                    parent_commands.spawn(bundle)
-                };
+                let mut ui_box = parent_commands.spawn(bundle);
+                if let Some(marker) = marker {
+                    ui_box.insert(marker);
+                }
 
                 let ui_box_id = ui_box.id();
 
                 add_ast_writer.send(AddToAst {
                     parent: None,
-                    child: (ui_box_id, block_type),
+                    child: (ui_box_id, block_type.clone()),
                 });
 
                 ui_box.with_children(|parent| {
                     // Spawn Text
                     parent.spawn((
-                        TextBundle::from(text).with_text_justify(JustifyText::Left),
+                        TextBundle::from_section(
+                            text,
+                            TextStyle {
+                                color: Color::BLACK,
+                                ..default()
+                            },
+                        )
+                        .with_text_justify(JustifyText::Left),
                         Label,
                     ));
 
@@ -340,15 +362,17 @@ impl UIBoxPlugin {
                         let mut hole_container = parent.spawn(HoleContainerBundle::new());
                         hole_container.with_children(|parent| {
                             match block_type {
-                                BlockType::Text => {
+                                block_type if block_type.name == "Text" => {
                                     let text_bundle = TextInputBundle::default();
                                     parent
                                         .spawn(CustomTextInputBundle::new(text_bundle, ui_box_id));
                                 }
                                 _ => {
-                                    for order in 0..holes {
+                                    for (order, hole_type) in
+                                        block_type.holes.into_iter().enumerate()
+                                    {
                                         parent
-                                            .spawn(HoleBundle::new(ui_box_id, order))
+                                            .spawn(HoleBundle::new(ui_box_id, order, hole_type))
                                             .with_children(|parent| {
                                                 parent.spawn(
                                                     TextBundle::from(order.to_string())
@@ -362,22 +386,16 @@ impl UIBoxPlugin {
                     }
                 });
 
-                if parent.is_none() {
-                    for index in 0..connections {
-                        let Some(direction) = ConnectionDirection::get_direction(index) else {
-                            error!("Direction index {index} is not handled");
-                            continue;
-                        };
-                        connector_writer.send(SpawnConnector {
-                            connector: Connector {
-                                fixture: ui_box.id(),
-                                direction,
-                                // connection_type: ConnectionType::Flow,
-                                connected: false,
-                            },
-                            radius: 10.,
-                        });
-                    }
+                for direction in connections {
+                    connector_writer.send(SpawnConnector {
+                        connector: Connector {
+                            fixture: ui_box.id(),
+                            direction,
+                            // connection_type: ConnectionType::Flow,
+                            connected: false,
+                        },
+                        radius: 10.,
+                    });
                 }
             });
         }
@@ -401,7 +419,7 @@ impl UIBoxPlugin {
     }
 
     fn translate_position_args(
-        mut query: Query<(&mut Position, &GlobalTransform), (With<Arg>, Changed<Position>)>,
+        mut query: Query<(&mut Position, &GlobalTransform), (With<Arg>, Changed<GlobalTransform>)>,
     ) {
         for (mut position, transform) in &mut query {
             position.0 = transform.translation().xy();
@@ -494,24 +512,26 @@ impl UIBoxPlugin {
 
     fn make_focus_passable(
         drag_entity: Res<DragEntity>,
-        mut focus_block: Query<&mut FocusPolicy, With<Block>>,
+        mut focus_block: Query<(&mut FocusPolicy, &mut BackgroundColor), With<Block>>,
     ) {
         if let Some(entity) = drag_entity.entity {
-            let Ok(mut policy) = focus_block.get_mut(entity) else {
+            let Ok((mut policy, mut background_color)) = focus_block.get_mut(entity) else {
                 return;
             };
+            background_color.0 = background_color.0.with_a(0.5);
+
             *policy = FocusPolicy::Pass;
         }
     }
     fn make_focus_unpassable(
         drag_entity: Res<DragEntity>,
-        mut focus_block: Query<&mut FocusPolicy, With<Block>>,
+        mut focus_block: Query<(&mut FocusPolicy, &mut BackgroundColor), With<Block>>,
     ) {
         if let Some(entity) = drag_entity.entity {
-            let Ok(mut policy) = focus_block.get_mut(entity) else {
+            let Ok((mut policy, mut background)) = focus_block.get_mut(entity) else {
                 return;
             };
-            info!("Made focus unpassable");
+            background.0 = background.0.with_a(1.);
             *policy = FocusPolicy::Block;
         } else {
             error!("There's no drag entity no more");
@@ -524,6 +544,7 @@ impl UIBoxPlugin {
         children: Query<&Children>,
         connectors: Query<&Connector>,
         mut style: Query<&mut Style>,
+        hole: Query<&Hole>,
     ) {
         for event in arg_reader.read() {
             info!("Running the spawning of args");
@@ -558,7 +579,10 @@ impl UIBoxPlugin {
             // connectors from it
 
             arg_commands
-                .insert(Arg)
+                .insert(Arg {
+                    owner: event.parent,
+                    order: hole.get(event.parent).unwrap().order,
+                })
                 .set_parent(event.parent)
                 .remove_children(children_connectors.as_slice());
 
@@ -568,81 +592,103 @@ impl UIBoxPlugin {
         }
     }
 
-    fn _handle_outside_hole(
-        drag_entity: Res<DragEntity>,
-        hover_entity: Res<HoverEntity>,
-        background: Query<&BackgroundBox>,
-        mut position: Query<
-            (Entity, &BlockType, &Size, &Position, &mut GlobalTransform),
-            With<Arg>,
-        >,
-        mut delete_writer: EventWriter<DeleteEvent>,
-        mut spawn_writer: EventWriter<SpawnUIBox>,
-    ) {
-        if let Some((entity, &drag_block_type, size, position, mut global_transform)) = drag_entity
-            .entity
-            .and_then(|entity| position.get_mut(entity).ok())
-        {
-            if hover_entity
-                .entity
-                .is_some_and(|entity| background.get(entity).is_ok())
-            {
-                delete_writer.send(DeleteEvent(entity));
-                info!("Deleted the entity");
-                let bundle = BlockBundle::new(
-                    position.x(),
-                    position.y(),
-                    size.width(),
-                    size.height(),
-                    InteractionFocusBundle::default(),
-                    drag_block_type,
-                );
-                spawn_writer.send(SpawnUIBox {
-                    bundle,
-                    parent: None,
-                });
-            } else {
-                let old_pos = drag_entity.drag_start.unwrap().extend(0.);
-                let new_transform =
-                    Transform::default().with_translation(position.0.extend(0.) - old_pos);
-                *global_transform = global_transform.mul_transform(new_transform);
-            }
-        }
-    }
-
     fn handle_hover_on_hole(
         drag_entity: Res<DragEntity>,
         hover_entity: Res<HoverEntity>,
         hole_query: Query<(Entity, &Hole)>,
         arg_query: Query<&Arg>,
-        boxes: Query<&BlockType, With<Block>>,
+        boxes: Query<(Entity, &BlockType), With<Block>>,
         mut arg_writer: EventWriter<SpawnArg>,
+        mut error_writer: EventWriter<ErrorEvent>,
     ) {
-        if let Some(drag_entity) = drag_entity
+        if let Some((drag_entity, block_type)) = drag_entity
             .entity
-            .filter(|&entity| {
+            .and_then(|entity| {
                 boxes
                     .get(entity)
-                    .is_ok_and(|block_type| block_type.can_be_in_a_hole())
+                    .ok()
+                    .filter(|(_, block_type)| block_type.can_be_in_a_hole())
             })
-            // If it is not already an arg
-            .filter(|&entity| arg_query.get(entity).is_err())
+            .filter(|&(entity, _)| arg_query.get(entity).is_err())
         {
-            if let Some(hover_entity) = hover_entity
+            if let Some((hover_entity, hole)) = hover_entity
                 .entity
                 .and_then(|entity| hole_query.get(entity).ok())
                 .filter(|(_, hole)| hole.owner != drag_entity)
-                .map(|(entity, _)| entity)
             {
-                arg_writer.send(SpawnArg {
-                    arg: drag_entity,
-                    parent: hover_entity,
-                });
+                let block_type_value = &block_type.value;
+                let hole_type_value = &hole.hole_type;
+                if hole_type_value == &HoleType::Any || block_type_value == hole_type_value {
+                    arg_writer.send(SpawnArg {
+                        arg: drag_entity,
+                        parent: hover_entity,
+                    });
+                } else {
+                    error_writer.send(ErrorEvent(
+                        format!("Block with type {block_type_value:?} was dropped in a hole that expected {hole_type_value:?}")
+                    ));
+                }
             }
         }
     }
-    fn get_language() {
-        info!("{:#?}", Language::new())
+
+    fn move_arg_according_to_mouse(
+        curr_drag: Res<DragEntity>,
+        mut arg_query: Query<&mut GlobalTransform, With<Arg>>,
+        mut mouse_motions: EventReader<CursorMoved>,
+    ) {
+        if let Some(mut transform) = curr_drag
+            .entity
+            .and_then(|entity| arg_query.get_mut(entity).ok())
+        {
+            for delta in mouse_motions
+                .read()
+                .map(|motion| motion.delta.unwrap_or_default())
+            {
+                let new_transform = Transform::default().with_translation(delta.extend(0.));
+                *transform = transform.mul_transform(new_transform);
+            }
+        }
+    }
+
+    fn handle_outside_hole(
+        curr_drag: Res<DragEntity>,
+        hover_entity: Res<HoverEntity>,
+        background: Query<&BackgroundBox>,
+        mut args: Query<(Entity, &GlobalTransform, &mut Style), With<Arg>>,
+        mut commands: Commands,
+    ) {
+        if let Some(hover_entity) = hover_entity
+            .entity
+            .filter(|&entity| background.get(entity).is_ok())
+        {
+            if let Some((entity, global_transform, mut styles)) = curr_drag
+                .entity
+                .and_then(|entity| args.get_mut(entity).ok())
+            {
+                commands.entity(entity).remove::<Arg>();
+
+                let mut background = commands.entity(hover_entity);
+
+                // INFO: Set the variable to be absolute and get the current global position and set it
+                // the top and left to that position
+
+                let curr_pos = global_transform.translation().xy();
+                styles.position_type = PositionType::Absolute;
+                styles.top = Val::Px(curr_pos.y);
+                styles.left = Val::Px(curr_pos.x);
+
+                background.push_children(&[entity]);
+            }
+        }
+    }
+
+    fn print_block_type(active: Res<ActiveEntity>, blocks: Query<&BlockType>) {
+        if let Some(active) = active.entity {
+            if let Ok(block_type) = blocks.get(active) {
+                info!("{block_type:?}");
+            }
+        }
     }
 }
 
@@ -650,13 +696,10 @@ impl Plugin for UIBoxPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<SpawnUIBox>()
             .add_event::<SpawnArg>()
+            .insert_resource(Language::new())
             .add_systems(
                 Startup,
-                (
-                    Self::spawn_background_box,
-                    Self::spawn_initial_box,
-                    Self::get_language,
-                ),
+                (Self::spawn_background_box, Self::spawn_initial_box),
             )
             .add_systems(OnEnter(DragState::Started), Self::make_focus_passable)
             .add_systems(
@@ -664,7 +707,7 @@ impl Plugin for UIBoxPlugin {
                 (
                     Self::handle_hover_on_hole,
                     Self::handle_spawn_active_arg,
-                    // Self::handle_outside_hole,
+                    Self::handle_outside_hole,
                     Self::make_focus_unpassable,
                 )
                     .chain(),
@@ -677,12 +720,13 @@ impl Plugin for UIBoxPlugin {
                         Self::handle_color_change,
                         Self::move_active_box_according_to_mouse
                             .run_if(in_state(DragState::Started)),
-                        // Self::move_arg_according_to_mouse.run_if(in_state(DragState::Started)),
                         Self::move_according_to_keyboard,
+                        Self::move_arg_according_to_mouse.run_if(in_state(DragState::Started)),
                         Self::spawn_box,
                         Self::translate_position,
                         Self::translate_position_args,
                         Self::update_size,
+                        Self::print_block_type.run_if(input_just_pressed(KeyCode::KeyH)),
                     )
                         .chain()
                         .in_set(GameSets::Running),

@@ -1,0 +1,99 @@
+[[blocks]]
+name = "Comparitor"
+language = "javascript"
+holes = ["Any", "Comparitor", "Any"]
+connectors = []
+template_string = "{{1}} {{2}} {{3}}"
+in_hole = true
+value = "Bool"
+concept_type = "Input"
+
+[[blocks]]
+name = "If"
+language = "javascript"
+holes = ["Bool"]
+connectors = ["Right", "Left", "Bottom"]
+template_string = "if( {{1}} ) { {{2}} } else { {{3}} }"
+in_hole = false
+value = "Unit"
+concept_type = "ControlFlow"
+
+[[blocks]]
+name = "Print"
+language = "javascript"
+holes = ["Any"]
+connectors = ["Bottom"]
+template_string = "console.log( {{1}} )"
+in_hole = false
+value = "Unit"
+concept_type = "Output"
+
+[[blocks]]
+name = "Declaration"
+language = "javascript"
+holes = ["Variable", "Any"]
+connectors = ["Bottom"]
+template_string = "let {{1}} = {{2}}"
+in_hole = false
+value = "Unit"
+concept_type = "ControlFlow"
+
+[[blocks]]
+name = "Variable"
+language = "javascript"
+holes = ["Any"]
+connectors = []
+template_string = "{{1}}"
+in_hole = true
+value = "Variable"
+concept_type = "Input"
+
+[[blocks]]
+name = "Text"
+language = "javascript"
+holes = ["Any"]
+connectors = []
+template_string = "{{1}}"
+in_hole = true
+value = "Any"
+concept_type = "Input"
+
+[[blocks]]
+name = "String"
+language = "javascript"
+holes = ["Any"]
+connectors = []
+template_string = "\"{{1}}\""
+in_hole = true
+value = "String"
+concept_type = "Input"
+
+[[blocks]]
+name = "Start"
+language = "javascript"
+holes = []
+connectors = ["Bottom"]
+template_string = ""
+in_hole = false
+value = "Unit"
+concept_type = "ControlFlow"
+
+[[blocks]]
+name = "Input"
+language = "javascript"
+holes = ["String"]
+connectors = []
+template_string = "prompt({{1}})"
+in_hole = true
+value = "String"
+concept_type = "Input"
+
+[[blocks]]
+name = "IntConv"
+language = "javascript"
+holes = ["String"]
+connectors = []
+template_string = "parseInt({{1}})"
+in_hole = true
+value = "Number"
+concept_type = "ControlFlow"

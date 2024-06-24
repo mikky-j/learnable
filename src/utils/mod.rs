@@ -2,13 +2,15 @@
 mod size;
 // mod temp_line;
 
-use std::fs;
+use std::{fmt::Debug, fs};
 
 use serde::{Deserialize, Serialize};
 pub use size::*;
 // pub use temp_line::*;
 
-use bevy::{math::bounding::Aabb2d, prelude::*};
+use bevy::{
+    math::bounding::Aabb2d, prelude::*, render::render_resource::encase::rts_array::Length,
+};
 
 use crate::connectors::ConnectionDirection;
 
@@ -64,8 +66,9 @@ use crate::connectors::ConnectionDirection;
 //     Diamond,
 // }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub enum HoleType {
+    #[default]
     Unit,
     Any,
     Number,
@@ -77,25 +80,56 @@ pub enum HoleType {
 }
 
 impl HoleType {
-    fn valid_input(&self, value: &str) -> bool {
+    pub fn valid_input(&self, value: &str) -> bool {
         if value.is_empty() {
             return false;
         }
         match self {
             HoleType::Number => value.parse::<u128>().is_ok() || value.parse::<f64>().is_ok(),
             HoleType::String => true,
-            HoleType::Bool => value.eq("True") || value.eq("False"),
+            HoleType::Bool => value.eq("true") || value.eq("false"),
             HoleType::Comparitor => matches!(value, ">" | "<" | "==" | "!="),
             HoleType::Variable => {
                 matches!(value.chars().next().unwrap(), 'a'..='z' | 'A'..='Z' | '_')
+                    && !value.contains(char::is_whitespace)
             }
             _ => true,
         }
     }
+
+    // This function tries to get the HoleType from the value
+    pub fn get_derived_type(value: &str) -> Self {
+        match value {
+            e if HoleType::Number.valid_input(e) => Self::Number,
+            e if HoleType::Bool.valid_input(e) => Self::Bool,
+            e if HoleType::Comparitor.valid_input(e) => Self::Comparitor,
+            e if HoleType::Variable.valid_input(e) => Self::Variable,
+            _ => Self::Any,
+        }
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize, Component)]
-pub struct NewBlockType {
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+pub enum ConceptType {
+    #[default]
+    ControlFlow,
+    Input,
+    Output,
+}
+
+impl ConceptType {
+    pub fn get_color(&self) -> Color {
+        match self {
+            ConceptType::ControlFlow => Color::rgb_u8(170, 203, 253),
+            ConceptType::Input => Color::rgb_u8(208, 227, 218),
+            ConceptType::Output => Color::rgb_u8(252, 240, 137),
+        }
+    }
+}
+
+// TODO: Custom Defaultl
+#[derive(Debug, Serialize, Deserialize, Component, Clone, Default, PartialEq)]
+pub struct BlockType {
     pub name: String,
     pub language: String,
     pub holes: Vec<HoleType>,
@@ -103,88 +137,69 @@ pub struct NewBlockType {
     pub template_string: String,
     pub in_hole: bool,
     pub value: HoleType,
+    pub concept_type: ConceptType,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Resource, Serialize, Deserialize)]
 pub struct Language {
-    pub blocks: Vec<NewBlockType>,
+    pub blocks: Vec<BlockType>,
 }
 
 impl Language {
     pub fn new() -> Self {
-        let file = fs::read_to_string("blocks/javascript.toml").unwrap();
-        let language: Language = toml::from_str(file.as_str()).unwrap();
+        let file = include_str!("../../blocks/javascript.toml");
+        let language: Language = toml::from_str(file).unwrap();
         language
+    }
+    pub fn get_block(&self, name: &str) -> Option<BlockType> {
+        self.blocks
+            .iter()
+            .find(|block| block.name == name)
+            .map(ToOwned::to_owned)
     }
 }
 
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub enum BlockType {
-    #[default]
-    Declaration,
-    Variable,
-    Text,
-    If,
-    Comparison,
-    Start,
-    Print,
-}
-
+// #[derive(Component, Debug, Clone, Copy, Default)]
+// pub enum BlockType {
+//     #[default]
+//     Declaration,
+//     Variable,
+//     Text,
+//     If,
+//     Comparison,
+//     Start,
+//     Print,
+// }
+//
 impl BlockType {
     #[inline]
-    pub const fn get_template(&self) -> &'static str {
-        match self {
-            BlockType::Declaration => "let {{1}} = {{2}}",
-            BlockType::If => "if ({{1}}) { {{2}} } else { {{3}} }",
-            BlockType::Comparison => "{{1}} {{2}} {{3}}",
-            BlockType::Variable | BlockType::Text => "{{1}}",
-            BlockType::Print => "console.log(\"{{1}}\")",
-            _ => "",
-        }
+    pub fn get_template(&self) -> String {
+        self.template_string.clone()
     }
 
     #[allow(unused)]
-    pub const fn can_be_in_a_hole(&self) -> bool {
-        match self {
-            BlockType::Declaration => false,
-            BlockType::Variable => true,
-            BlockType::Text => true,
-            BlockType::If => false,
-            BlockType::Comparison => true,
-            BlockType::Start => false,
-            BlockType::Print => false,
-        }
+    pub fn can_be_in_a_hole(&self) -> bool {
+        self.in_hole
     }
 
     #[inline]
-    pub const fn get_holes(&self) -> usize {
-        match self {
-            BlockType::Declaration => 2,
-            BlockType::If => 1,
-            BlockType::Comparison => 3,
-            BlockType::Text | BlockType::Variable | BlockType::Print => 1,
-            _ => 0,
-        }
+    pub fn get_holes(&self) -> usize {
+        self.holes.len()
     }
 
-    #[inline]
-    pub const fn get_connectors(&self) -> usize {
-        match self {
-            BlockType::If => 3,
-            BlockType::Comparison | BlockType::Variable | BlockType::Text => 0,
-            _ => 1,
-        }
-    }
+    // #[inline]
+    // pub fn get_connectors(&self) -> Co {
+    //     self.connectors.len()
+    // }
 }
 
 impl std::fmt::Display for BlockType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let val = format!("{self:?}");
-        val.fmt(f)
+        std::fmt::Display::fmt(&self.name, f)
     }
 }
 
-#[derive(Component, Clone, Copy, Debug, Default)]
+#[derive(Component, Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Position(pub Vec2);
 
 impl Position {

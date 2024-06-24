@@ -104,7 +104,7 @@ impl InteractionFocusBundle {
 impl Default for InteractionFocusBundle {
     fn default() -> Self {
         Self {
-            focus_bundle: FocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            focus_bundle: FocusBundle::new(Color::RED, Color::GREEN, Color::rgba_u8(0, 0, 0, 0)),
             interaction: Default::default(),
         }
     }
@@ -116,7 +116,7 @@ impl FocusPlugin {
     fn handle_interaction(
         focus_policy: Query<&FocusPolicy>,
         interactions: Query<(Entity, &Interaction), (Changed<Interaction>, With<Focus>)>,
-        // labels: Query<&EntityLabel>,
+        // labels: Query<&crate::EntityLabel>,
         mut select_writer: EventWriter<SelectEvent>,
         mut hover_writer: EventWriter<HoverEvent>,
     ) {
