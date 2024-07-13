@@ -13,26 +13,21 @@ mod text_input;
 mod ui_box;
 mod ui_line;
 mod utils;
+mod wasm;
 
-use std::fs;
+use std::time::Duration;
 
-use bevy::{
-    app::PluginGroupBuilder, input::common_conditions::input_just_pressed, prelude::*,
-    utils::HashMap, window::PresentMode,
-};
-use bevy_simple_text_input::TextInputValue;
+use bevy::{app::PluginGroupBuilder, prelude::*, utils::HashMap, window::PresentMode};
 use serde::{Deserialize, Serialize};
 use ui_line::UiLinePlugin;
+use wasm::WASMRequest;
 
 use crate::{
-    ast::{AddToAst, Ast, BlockData, BlockDataMap},
+    ast::BlockData,
     camera::CameraPlugin,
     focus::FocusPlugin,
-    text_input::{CustomTextInputPlugin, TextInput},
-    ui_box::{
-        Arg, BackgroundBox, BlockBundle, ErrorBox, ErrorBoxBundle, Hole, SpawnArg, SpawnUIBox,
-        UIBoxPlugin,
-    },
+    text_input::CustomTextInputPlugin,
+    ui_box::{BackgroundBox, ErrorBox, ErrorBoxBundle, UIBoxPlugin},
     ui_line::UiLine,
     utils::{BlockType, Position, Size},
 };
@@ -59,7 +54,7 @@ pub fn get_default_plugins() -> PluginGroupBuilder {
         primary_window: Some(Window {
             title: "Learnable test".into(),
             canvas: Some("#game-canvas".into()),
-            resolution: if cfg!(target_os = "web") {
+            resolution: if cfg!(target_family = "wasm") {
                 default()
             } else {
                 (WINDOW_WIDTH, WINDOW_HEIGHT).into()
@@ -70,6 +65,10 @@ pub fn get_default_plugins() -> PluginGroupBuilder {
         }),
         ..default()
     })
+}
+
+pub fn set_background_color(mut clear_color: ResMut<ClearColor>) {
+    clear_color.0 = WHITE;
 }
 
 pub fn translate_vec_to_world(mut vector: Vec2, window_height: f32, window_width: f32) -> Vec2 {
@@ -107,6 +106,9 @@ pub struct DeleteEvent(pub Entity);
 
 #[derive(Debug, Event, Clone)]
 pub struct ErrorEvent(pub String);
+
+#[derive(Debug, Component, Clone)]
+pub struct ErrorTimer(Timer);
 
 #[derive(Debug, Component, Clone, Copy)]
 pub struct Marker(pub Entity);
@@ -150,8 +152,11 @@ impl GamePlugin {
         mut commands: Commands,
         prev_error_message: Query<Entity, With<ErrorBox>>,
         background: Query<Entity, With<BackgroundBox>>,
+        mut wasm_writer: EventWriter<WASMRequest>,
     ) {
         for event in reader.read().map(ToOwned::to_owned) {
+            wasm_writer.send(WASMRequest(wasm::Message::Error(event.0.clone())));
+
             if let Ok(previous) = prev_error_message.get_single() {
                 commands.entity(previous).despawn_recursive();
             }
@@ -161,196 +166,213 @@ impl GamePlugin {
                 continue;
             };
             command.with_children(|parent| {
-                parent.spawn(ErrorBoxBundle::new(event.0));
+                parent.spawn((
+                    ErrorBoxBundle::new(event.0),
+                    ErrorTimer(Timer::new(Duration::from_secs(2), TimerMode::Once)),
+                ));
             });
         }
     }
 
-    fn store_state(
-        mut game_state: ResMut<GameState>,
-        text_value: Query<(&TextInput, &TextInputValue)>,
-        block_query: Query<(Entity, &Position, &Size, &BlockType)>,
-        arg_query: Query<&Arg>,
-        ast: Res<Ast>,
-        block_map: Res<BlockDataMap>,
-        lines: Query<&UiLine>,
-    ) {
-        let mut app_state: HashMap<Entity, State> = HashMap::default();
-        for (entity, &position, &size, block_type) in &block_query {
-            let mut parent = None;
-            let mut order = None;
-            if let Ok(arg) = arg_query.get(entity) {
-                parent = Some(arg.owner);
-                order = Some(arg.order);
-            }
-            let connections = ast
-                .map
-                .get(&entity)
-                .map(ToOwned::to_owned)
-                .unwrap_or_default();
-
-            let holes = block_map
-                .map
-                .get(&entity)
-                .map(ToOwned::to_owned)
-                .unwrap_or_default();
-
-            let value = if block_type.name == "Text" {
-                text_value.iter().find_map(|(text_input, text_value)| {
-                    if text_input.owner == entity {
-                        Some(text_value.0.clone())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            };
-            let state = State {
-                parent,
-                order,
-                connections,
-                holes,
-                block_type: block_type.to_owned(),
-                position,
-                size,
-                value,
-            };
-
-            app_state.insert(entity, state);
-        }
-        game_state.set_if_neq(GameState {
-            map: app_state,
-            lines: lines.into_iter().map(ToOwned::to_owned).collect(),
-        });
-        let text = serde_json::to_string(game_state.into_inner()).unwrap();
-        fs::write("state.json", text).unwrap();
-    }
-
-    fn load_state(
-        mut game_state: ResMut<GameState>,
+    fn poll_timer(
         mut commands: Commands,
-        background: Query<Entity, With<BackgroundBox>>,
-        block_children: Query<&Children>,
-        block_type: Query<&BlockType>,
+        mut query: Query<(Entity, &mut ErrorTimer)>,
+        res: Res<Time>,
     ) {
-        let value: GameState =
-            serde_json::from_str(fs::read_to_string("state.json").unwrap().as_str()).unwrap();
-        game_state.set_if_neq(value);
-
-        let background_entity = background.single();
-
-        let children = block_children.get(background_entity).unwrap();
-
-        for &child in children {
-            if block_type.contains(child) {
-                commands.entity(child).despawn_recursive();
+        for (entity, mut timer) in &mut query {
+            if timer.0.tick(res.delta()).just_finished() {
+                commands.entity(entity).despawn_recursive();
             }
         }
     }
 
-    fn spawn_entities_from_state(
-        game_state: Res<GameState>,
-        mut box_writer: EventWriter<SpawnUIBox>,
-    ) {
-        for (&entity, state) in &game_state.map {
-            let spawn_box = SpawnUIBox {
-                bundle: BlockBundle::new(
-                    state.position.x(),
-                    state.position.y(),
-                    state.size.width(),
-                    state.size.height(),
-                    Default::default(),
-                    state.block_type.clone(),
-                ),
-                marker: Some(Marker(entity)),
-            };
-            box_writer.send(spawn_box);
-        }
-    }
+    //     fn store_state(
+    //         mut game_state: ResMut<GameState>,
+    //         text_value: Query<(&TextInput, &TextInputValue)>,
+    //         block_query: Query<(Entity, &Position, &Size, &BlockType)>,
+    //         arg_query: Query<&Arg>,
+    //         ast: Res<Ast>,
+    //         block_map: Res<BlockDataMap>,
+    //         lines: Query<&UiLine>,
+    //     ) {
+    //         let mut app_state: HashMap<Entity, State> = HashMap::default();
+    //         for (entity, &position, &size, block_type) in &block_query {
+    //             let mut parent = None;
+    //             let mut order = None;
+    //             if let Ok(arg) = arg_query.get(entity) {
+    //                 parent = Some(arg.owner);
+    //                 order = Some(arg.order);
+    //             }
+    //             let connections = ast
+    //                 .map
+    //                 .get(&entity)
+    //                 .map(ToOwned::to_owned)
+    //                 .unwrap_or_default();
 
-    fn load_entities(
-        game_state: Res<GameState>,
-        mut arg_writer: EventWriter<SpawnArg>,
-        mut ast_writer: EventWriter<AddToAst>,
-        markers: Query<(Entity, &Marker)>,
-        holes: Query<(Entity, &Hole)>,
-        mut text_value: Query<(&TextInput, &mut TextInputValue)>,
-        mut commands: Commands,
-    ) {
-        let markers: HashMap<Entity, Entity> = markers
-            .iter()
-            .map(|(entity, &Marker(new_entity))| (entity, new_entity))
-            .collect();
+    //             let holes = block_map
+    //                 .map
+    //                 .get(&entity)
+    //                 .map(ToOwned::to_owned)
+    //                 .unwrap_or_default();
 
-        // Spawn all lines again
-        for line in &game_state.lines {
-            let new_line = UiLine {
-                from: markers.get(&line.from).unwrap().to_owned(),
-                to_direction: line.to_direction,
-                to: markers.get(&line.to).unwrap().to_owned(),
-                from_direction: line.from_direction,
-            };
+    //             let value = if block_type.name == "Text" {
+    //                 text_value.iter().find_map(|(text_input, text_value)| {
+    //                     if text_input.owner == entity {
+    //                         Some(text_value.0.clone())
+    //                     } else {
+    //                         None
+    //                     }
+    //                 })
+    //             } else {
+    //                 None
+    //             };
+    //             let state = State {
+    //                 parent,
+    //                 order,
+    //                 connections,
+    //                 holes,
+    //                 block_type: block_type.to_owned(),
+    //                 position,
+    //                 size,
+    //                 value,
+    //             };
 
-            let block_type = game_state.map.get(&line.to).unwrap().block_type.clone();
+    //             app_state.insert(entity, state);
+    //         }
+    //         game_state.set_if_neq(GameState {
+    //             map: app_state,
+    //             lines: lines.into_iter().map(ToOwned::to_owned).collect(),
+    //         });
+    //         let text = serde_json::to_string(game_state.into_inner()).unwrap();
+    //         fs::write("state.json", text).unwrap();
+    //     }
 
-            ast_writer.send(AddToAst {
-                parent: Some((new_line.from, new_line.from_direction.get_parse_order())),
-                child: (new_line.to, block_type),
-            });
+    //     fn load_state(
+    //         mut game_state: ResMut<GameState>,
+    //         mut commands: Commands,
+    //         background: Query<Entity, With<BackgroundBox>>,
+    //         block_children: Query<&Children>,
+    //         block_type: Query<&BlockType>,
+    //     ) {
+    //         let value: GameState =
+    //             serde_json::from_str(fs::read_to_string("state.json").unwrap().as_str()).unwrap();
+    //         game_state.set_if_neq(value);
 
-            commands.spawn(new_line);
-        }
+    //         let background_entity = background.single();
 
-        // Spawn all args and load all text back into the block
-        for (entity, state) in game_state
-            .map
-            .iter()
-            .filter(|(_, state)| state.parent.is_some())
-        {
-            let &new_parent = state
-                .parent
-                .map(|parent| markers.get(&parent).unwrap())
-                .unwrap();
+    //         let children = block_children.get(background_entity).unwrap();
 
-            let &child_entity = markers.get(entity).unwrap();
+    //         for &child in children {
+    //             if block_type.contains(child) {
+    //                 commands.entity(child).despawn_recursive();
+    //             }
+    //         }
+    //     }
 
-            if state.block_type.name == "Text" {
-                let mut text_input = text_value
-                    .iter_mut()
-                    .find_map(|(text_input, text_value)| {
-                        if text_input.owner == child_entity {
-                            Some(text_value)
-                        } else {
-                            None
-                        }
-                    })
-                    .expect("Couldn't get the text");
-                text_input.0 = state.value.clone().unwrap_or_default();
-            }
+    //     fn spawn_entities_from_state(
+    //         game_state: Res<GameState>,
+    //         mut box_writer: EventWriter<SpawnUIBox>,
+    //     ) {
+    //         for (&entity, state) in &game_state.map {
+    //             let spawn_box = SpawnUIBox {
+    //                 bundle: BlockBundle::new(
+    //                     state.position.x(),
+    //                     state.position.y(),
+    //                     state.size.width(),
+    //                     state.size.height(),
+    //                     Default::default(),
+    //                     state.block_type.clone(),
+    //                 ),
+    //                 marker: Some(Marker(entity)),
+    //             };
+    //             box_writer.send(spawn_box);
+    //         }
+    //     }
 
-            let mut holes = holes
-                .iter()
-                .filter(|(_, hole)| hole.owner == new_parent)
-                .collect::<Vec<_>>();
+    //     fn load_entities(
+    //         game_state: Res<GameState>,
+    //         mut arg_writer: EventWriter<SpawnArg>,
+    //         mut ast_writer: EventWriter<AddToAst>,
+    //         markers: Query<(Entity, &Marker)>,
+    //         holes: Query<(Entity, &Hole)>,
+    //         mut text_value: Query<(&TextInput, &mut TextInputValue)>,
+    //         mut commands: Commands,
+    //     ) {
+    //         let markers: HashMap<Entity, Entity> = markers
+    //             .iter()
+    //             .map(|(entity, &Marker(new_entity))| (entity, new_entity))
+    //             .collect();
 
-            holes.sort_by(|(_, x), (_, other)| x.order.cmp(&other.order));
+    //         // Spawn all lines again
+    //         for line in &game_state.lines {
+    //             let new_line = UiLine {
+    //                 from: markers.get(&line.from).unwrap().to_owned(),
+    //                 to_direction: line.to_direction,
+    //                 to: markers.get(&line.to).unwrap().to_owned(),
+    //                 from_direction: line.from_direction,
+    //             };
 
-            if let Some(order) = state.order {
-                let (hole, _) = holes[order];
-                arg_writer.send(SpawnArg {
-                    arg: child_entity,
-                    parent: hole,
-                });
-            }
-        }
-    }
+    //             let block_type = game_state.map.get(&line.to).unwrap().block_type.clone();
+
+    //             ast_writer.send(AddToAst {
+    //                 parent: Some((new_line.from, new_line.from_direction.get_parse_order())),
+    //                 child: (new_line.to, block_type),
+    //             });
+
+    //             commands.spawn(new_line);
+    //         }
+
+    //         // Spawn all args and load all text back into the block
+    //         for (entity, state) in game_state
+    //             .map
+    //             .iter()
+    //             .filter(|(_, state)| state.parent.is_some())
+    //         {
+    //             let &new_parent = state
+    //                 .parent
+    //                 .map(|parent| markers.get(&parent).unwrap())
+    //                 .unwrap();
+
+    //             let &child_entity = markers.get(entity).unwrap();
+
+    //             if state.block_type.name == "Text" {
+    //                 let mut text_input = text_value
+    //                     .iter_mut()
+    //                     .find_map(|(text_input, text_value)| {
+    //                         if text_input.owner == child_entity {
+    //                             Some(text_value)
+    //                         } else {
+    //                             None
+    //                         }
+    //                     })
+    //                     .expect("Couldn't get the text");
+    //                 text_input.0 = state.value.clone().unwrap_or_default();
+    //             }
+
+    //             let mut holes = holes
+    //                 .iter()
+    //                 .filter(|(_, hole)| hole.owner == new_parent)
+    //                 .collect::<Vec<_>>();
+
+    //             holes.sort_by(|(_, x), (_, other)| x.order.cmp(&other.order));
+
+    //             if let Some(order) = state.order {
+    //                 let (hole, _) = holes[order];
+    //                 arg_writer.send(SpawnArg {
+    //                     arg: child_entity,
+    //                     parent: hole,
+    //                 });
+    //             }
+    //         }
+    //     }
 }
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GameState>()
+        let app = app
+            .init_resource::<GameState>()
             .configure_sets(Update, (GameSets::Despawn, GameSets::Running).chain())
+            .add_systems(PreStartup, set_background_color)
             .add_systems(
                 Update,
                 apply_deferred
@@ -361,6 +383,7 @@ impl Plugin for GamePlugin {
                 Update,
                 (
                     Self::handle_delete_block.in_set(GameSets::Despawn),
+                    Self::poll_timer,
                     // Self::store_state.run_if(input_just_pressed(KeyCode::KeyZ)),
                     // Self::load_state.run_if(input_just_pressed(KeyCode::KeyL)),
                     // (
@@ -385,5 +408,8 @@ impl Plugin for GamePlugin {
             .add_plugins(CustomTextInputPlugin)
             .add_plugins(CameraPlugin)
             .add_plugins(ConnectorPlugin);
+        if cfg!(target_family = "wasm") {
+            app.add_plugins(wasm::WASMPlugin);
+        }
     }
 }

@@ -113,8 +113,14 @@ impl ConnectorBundle {
         let top = connector.direction.get_top();
         let left = connector.direction.get_left();
 
+        let color = match connector.direction {
+            ConnectionDirection::Left => Color::BLUE,
+            ConnectionDirection::Right => Color::RED,
+            _ => Color::BLACK,
+        };
+
         Self {
-            focus_bundle: InteractionFocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            focus_bundle: InteractionFocusBundle::new(Color::RED, Color::GREEN, color),
             connector,
             position,
             draggable: Draggable,
@@ -131,7 +137,7 @@ impl ConnectorBundle {
                 },
                 transform: Transform::default()
                     .with_translation(Vec2::new(-radius, -radius).extend(0.) / 2.),
-                background_color: BackgroundColor(Color::WHITE),
+                background_color: BackgroundColor(Color::BLACK),
                 focus_policy: bevy::ui::FocusPolicy::Block,
                 ..default()
             },

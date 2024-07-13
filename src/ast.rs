@@ -1,9 +1,17 @@
-use bevy::{input::common_conditions::input_just_pressed, prelude::*, utils::HashMap};
-use bevy_http_client::prelude::*;
+use bevy::{prelude::*, utils::HashMap};
 use bevy_simple_text_input::TextInputValue;
 use serde::{Deserialize, Serialize};
 
-use crate::{text_input::TextInput, ui_box::Hole, utils::BlockType, ErrorEvent, GameSets};
+use crate::{
+    text_input::TextInput,
+    ui_box::Hole,
+    utils::BlockType,
+    wasm::{Message, WASMRequest},
+    ErrorEvent, GameSets,
+};
+
+#[derive(Debug, Event, Default)]
+pub struct UpdateAst;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockData {
@@ -42,7 +50,7 @@ impl BlockDataMap {
                     if block_type.holes[index].valid_input(val.as_str()) {
                         value.push(val)
                     } else {
-                        return Err(format!("Couldn't expand hole {index} for {block_type}"));
+                        return Err(format!("Couldn't get value for {block_type}"));
                     }
                 }
                 BlockDataType::Hole(entity) => {
@@ -61,60 +69,6 @@ impl BlockDataMap {
         }
         Ok(template_string)
     }
-}
-
-fn get_block_data_hashmap(
-    holes: Query<(Entity, &Hole)>,
-    children: Query<&Children>,
-    block_type: Query<(Entity, &BlockType)>,
-    text_input: Query<(&TextInput, &TextInputValue)>,
-    mut block_map: ResMut<BlockDataMap>,
-) {
-    let mut hashmap: HashMap<Entity, Vec<BlockData>> = HashMap::default();
-    for (hole_entity, hole) in &holes {
-        let value = hashmap.entry(hole.owner).or_default();
-        let Some((child_entity, child_block)) =
-            children.get(hole_entity).ok().and_then(|children| {
-                children
-                    .iter()
-                    .find_map(|&child| block_type.get(child).ok())
-            })
-        else {
-            info!("Hole {hole_entity:?} children were not block_types");
-            continue;
-        };
-
-        let data_type = match child_block {
-            block_type if block_type.name == "Text" => {
-                let Some((_, text_value)) = text_input
-                    .iter()
-                    .find(|(text_input, _)| text_input.owner == child_entity)
-                else {
-                    info!("Entity {child_entity:?} had a BlockType::Text but no TextInputValue");
-                    continue;
-                };
-                BlockDataType::Value(text_value.0.clone())
-            }
-
-            _ => BlockDataType::Hole(child_entity),
-        };
-        let block_data = BlockData {
-            block_type: child_block.clone(),
-            data_type,
-            position: hole.order,
-        };
-        value.push(block_data);
-    }
-
-    let block_key = hashmap
-        .keys()
-        .filter_map(|&key| block_type.get(key).map(|(_, block_type)| block_type).ok())
-        .collect::<Vec<_>>();
-
-    info!("Block types of keys: {:?}", block_key);
-    info!("Hashmap: {hashmap:#?}");
-
-    block_map.map = hashmap;
 }
 
 #[derive(Resource, Debug, Default)]
@@ -165,7 +119,11 @@ impl Ast {
             Some((branch_entity, branch_block_type)) => {
                 let string =
                     self.traverse_branch(branch_entity, &branch_block_type, block_data_map)?;
-                Ok(format!("{full_string}\n{string}"))
+                if full_string.is_empty() {
+                    Ok(string)
+                } else {
+                    Ok(format!("{full_string}\n{string}"))
+                }
             }
             None => Ok(full_string),
         }
@@ -190,7 +148,11 @@ pub struct RemoveFromAst {
 pub struct ASTPlugin;
 
 impl ASTPlugin {
-    fn handle_add_to_ast(mut reader: EventReader<AddToAst>, mut ast: ResMut<Ast>) {
+    fn handle_add_to_ast(
+        mut reader: EventReader<AddToAst>,
+        mut update_writer: EventWriter<UpdateAst>,
+        mut ast: ResMut<Ast>,
+    ) {
         for AddToAst { parent, child } in reader.read().map(ToOwned::to_owned) {
             if let Some((parent, order)) = parent {
                 let value = ast.map.entry(parent).or_default();
@@ -198,6 +160,7 @@ impl ASTPlugin {
             } else {
                 ast.map.entry(child.0).or_default();
             }
+            update_writer.send(UpdateAst);
         }
     }
 
@@ -217,56 +180,93 @@ impl ASTPlugin {
         block_data_map: Res<BlockDataMap>,
         block_type: Query<(Entity, &BlockType)>,
         mut error_writer: EventWriter<ErrorEvent>,
-        mut request_writer: EventWriter<TypedRequest<()>>,
+        mut update_reader: EventReader<UpdateAst>,
+        mut wasm_writer: EventWriter<WASMRequest>,
     ) {
-        let Some((start_entity, start_block)) = block_type
-            .iter()
-            .find(|(_, block_type)| block_type.name == "Start")
-        else {
-            info!("There is no start block in the world");
-            return;
-        };
-        let code = match ast.traverse_branch(start_entity, start_block, block_data_map.as_ref()) {
-            Ok(code) => code,
-            Err(error) => {
-                error_writer.send(ErrorEvent(error));
+        if update_reader.read().last().is_some() {
+            let Some((start_entity, start_block)) = block_type
+                .iter()
+                .find(|(_, block_type)| block_type.name == "Start")
+            else {
+                info!("There is no start block in the world");
                 return;
-            }
-        };
-        info!("====== Outputed Code ======");
-        info!("{code}");
+            };
+            let code = match ast.traverse_branch(start_entity, start_block, block_data_map.as_ref())
+            {
+                Ok(code) => code,
+                Err(error) => {
+                    error_writer.send(ErrorEvent(error));
+                    return;
+                }
+            };
+            info!("====== Outputed Code ======");
+            info!("{code}");
 
-        request_writer.send(
-            HttpClient::new()
-                .post("http://localhost:3000/code")
-                .json(&Code { code })
-                .with_type::<()>(),
-        );
-
-        // let thread_pool = AsyncComputeTaskPool::get();
-        // let mut task = thread_pool.spawn(async move {
-        //     reqwest::Client::new()
-        //         .post("http://localhost:3000/code")
-        //         .json(&Code { code })
-        //         .send()
-        //         .await
-        // });
-
-        // Stage 1: Get the template string for the block
-        // Stage 2: Explore any alternative branches. Repeat step 1 there too
-        // Stage 3: Explore the main flow branch
-    }
-
-    fn handle_response(mut reader: EventReader<TypedResponse<()>>) {
-        for response in reader.read() {
-            println!("Recieved response");
+            wasm_writer.send(WASMRequest(Message::Code(code)));
         }
     }
-}
 
-#[derive(Serialize)]
-struct Code {
-    code: String,
+    fn get_block_data_hashmap(
+        holes: Query<(Entity, &Hole)>,
+        children: Query<&Children>,
+        block_type: Query<(Entity, &BlockType)>,
+        text_input: Query<(&TextInput, &TextInputValue)>,
+        mut block_map: ResMut<BlockDataMap>,
+        mut update_reader: EventReader<UpdateAst>,
+    ) {
+        if update_reader.read().last().is_some() {
+            let mut hashmap: HashMap<Entity, Vec<BlockData>> = HashMap::default();
+            for (hole_entity, hole) in &holes {
+                let Some((child_entity, child_block)) =
+                    children.get(hole_entity).ok().and_then(|children| {
+                        children
+                            .iter()
+                            .find_map(|&child| block_type.get(child).ok())
+                    })
+                else {
+                    info!("Hole {hole_entity:?} children were not block_types");
+                    continue;
+                };
+
+                let data_type = match child_block {
+                    block_type if block_type.has_text() => {
+                        let Some((_, text_value)) = text_input
+                            .iter()
+                            .find(|(text_input, _)| text_input.owner == child_entity)
+                        else {
+                            info!(
+                            "Entity {child_entity:?} had a BlockType::Text but no TextInputValue"
+                        );
+                            continue;
+                        };
+                        if block_type.name == "Text" {
+                            BlockDataType::Value(text_value.0.clone())
+                        } else {
+                            let data_type = BlockDataType::Value(text_value.0.clone());
+                            let data = BlockData {
+                                block_type: child_block.to_owned(),
+                                data_type,
+                                position: 0,
+                            };
+                            hashmap.insert(child_entity, vec![data]);
+                            BlockDataType::Hole(child_entity)
+                        }
+                    }
+
+                    _ => BlockDataType::Hole(child_entity),
+                };
+                let value = hashmap.entry(hole.owner).or_default();
+                let block_data = BlockData {
+                    block_type: child_block.clone(),
+                    data_type,
+                    position: hole.order,
+                };
+                value.push(block_data);
+            }
+
+            block_map.map = hashmap;
+        }
+    }
 }
 
 impl Plugin for ASTPlugin {
@@ -275,16 +275,14 @@ impl Plugin for ASTPlugin {
             .init_resource::<BlockDataMap>()
             .add_event::<AddToAst>()
             .add_event::<RemoveFromAst>()
-            .add_plugins(HttpClientPlugin)
-            .register_request_type::<()>()
+            .add_event::<UpdateAst>()
             .add_systems(
                 Update,
                 (
-                    get_block_data_hashmap.run_if(input_just_pressed(KeyCode::KeyP)),
+                    Self::get_block_data_hashmap,
                     Self::handle_add_to_ast,
                     Self::handle_remove_from_ast,
-                    Self::print_ast.run_if(input_just_pressed(KeyCode::KeyQ)),
-                    Self::handle_response,
+                    Self::print_ast,
                 )
                     .chain()
                     .in_set(GameSets::Running),

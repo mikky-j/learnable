@@ -4,6 +4,7 @@ use bevy_simple_text_input::{
 };
 
 use crate::{
+    ast::UpdateAst,
     focus::{ActiveEntity, FocusBundle, InteractionFocusBundle, SelectEvent},
     ui_box::{BackgroundBox, BlockBundle, SpawnUIBox},
     utils::{BlockType, HoleType, Language},
@@ -34,13 +35,13 @@ impl CustomTextInputBundle {
                     height: Val::Px(20.),
                     ..default()
                 },
-                border_color: Color::WHITE.into(),
+                border_color: Color::BLACK.into(),
                 focus_policy: FocusPolicy::Block,
                 ..default()
             },
             text_input_bundle,
             text_input: TextInput { owner },
-            focusable: FocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            focusable: FocusBundle::new(Color::RED, Color::GREEN, Color::BLACK),
             entity_label: crate::EntityLabel::new("Text Box"),
         }
     }
@@ -72,19 +73,29 @@ impl SearchBoxBundle {
                     min_height: Val::Px(20.),
                     ..default()
                 },
-                border_color: Color::WHITE.into(),
+                border_color: Color::BLACK.into(),
                 focus_policy: FocusPolicy::Block,
                 ..default()
             },
             text_input: TextInputBundle::default()
-                .with_placeholder("Search for block", None)
+                .with_placeholder(
+                    "Search for block",
+                    Some(TextStyle {
+                        color: Color::BLACK,
+                        ..default()
+                    }),
+                )
+                .with_text_style(TextStyle {
+                    color: Color::BLACK,
+                    ..default()
+                })
                 .with_settings(TextInputSettings {
                     retain_on_submit: false,
                     ..default()
                 })
                 .with_inactive(true),
             marker: SearchBox,
-            focus: FocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            focus: FocusBundle::new(Color::RED, Color::GREEN, Color::BLACK),
             entity_label: crate::EntityLabel::new("Search Box"),
         }
     }
@@ -107,6 +118,18 @@ impl CustomTextInputPlugin {
         }
     }
 
+    fn send_update_ast(
+        block_types: Query<&BlockType>,
+        text_query: Query<&TextInput, Changed<TextInputValue>>,
+        mut update_writer: EventWriter<UpdateAst>,
+    ) {
+        for text_input in &text_query {
+            if block_types.contains(text_input.owner) {
+                update_writer.send_default();
+            }
+        }
+    }
+
     fn set_text_block_type(
         mut block_types: Query<&mut BlockType>,
         text_query: Query<(&TextInput, &TextInputValue), Changed<TextInputInactive>>,
@@ -115,7 +138,9 @@ impl CustomTextInputPlugin {
         if reader.read().next().is_some() {
             for (text_input, value) in &text_query {
                 if let Ok(mut block_type) = block_types.get_mut(text_input.owner) {
-                    block_type.value = HoleType::get_derived_type(value.0.as_str());
+                    if block_type.name == "Text" {
+                        block_type.value = HoleType::get_derived_type(value.0.as_str());
+                    }
                 }
             }
         }
@@ -145,7 +170,14 @@ impl CustomTextInputPlugin {
                     ))
                     .with_children(|parent| {
                         parent.spawn((
-                            TextBundle::from("Search Box").with_text_justify(JustifyText::Left),
+                            TextBundle::from_section(
+                                "Search Box",
+                                TextStyle {
+                                    color: Color::BLACK,
+                                    ..default()
+                                },
+                            )
+                            .with_text_justify(JustifyText::Left),
                             Label,
                         ));
                         parent.spawn(SearchBoxBundle::new());
@@ -232,6 +264,7 @@ impl Plugin for CustomTextInputPlugin {
                     Self::handle_visiblity,
                     Self::toggle_visibility.run_if(input_just_pressed(KeyCode::Slash)),
                     Self::handle_search_box_submit,
+                    Self::send_update_ast,
                 )
                     .chain()
                     .in_set(GameSets::Running),

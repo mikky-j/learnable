@@ -4,7 +4,9 @@ use bevy::{
     ui::FocusPolicy,
 };
 
-use crate::{ui_line::Segment, utils::point_line_collision, DeleteEvent, GameSets};
+use crate::{
+    ui_box::BackgroundBox, ui_line::Segment, utils::point_line_collision, DeleteEvent, GameSets,
+};
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Focus {
@@ -266,10 +268,11 @@ impl FocusPlugin {
         mut hover: ResMut<HoverEntity>,
         mut drag: ResMut<DragEntity>,
         mut next_state: ResMut<NextState<DragState>>,
-        // query: Query<&Focus>,
+        background: Query<Entity, With<BackgroundBox>>, // query: Query<&Focus>,
     ) {
         for &DeleteEvent(_) in reader.read() {
-            active.entity = None;
+            let background = background.single();
+            active.entity = Some(background);
             hover.entity = None;
             drag.entity = None;
             next_state.set(DragState::Ended);

@@ -1,5 +1,15 @@
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    utils::{info, tracing::instrument::WithSubscriber},
+};
 use learnable::{get_default_plugins, GamePlugin};
+use std::{
+    cell::{OnceCell, RefCell},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Mutex, OnceLock,
+    },
+};
 
 fn main() {
     App::new()

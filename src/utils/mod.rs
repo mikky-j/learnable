@@ -135,6 +135,8 @@ pub struct BlockType {
     pub holes: Vec<HoleType>,
     pub connectors: Vec<ConnectionDirection>,
     pub template_string: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub in_hole: bool,
     pub value: HoleType,
     pub concept_type: ConceptType,
@@ -143,6 +145,11 @@ pub struct BlockType {
 #[derive(Debug, Resource, Serialize, Deserialize)]
 pub struct Language {
     pub blocks: Vec<BlockType>,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LanguageData {
+    name: String,
+    description: Option<String>,
 }
 
 impl Language {
@@ -156,6 +163,20 @@ impl Language {
             .iter()
             .find(|block| block.name == name)
             .map(ToOwned::to_owned)
+    }
+
+    pub fn get_lang_data(&self) -> Vec<LanguageData> {
+        self.blocks
+            .iter()
+            .map(|block| LanguageData {
+                name: block.name.clone(),
+                description: block.description.clone(),
+            })
+            .collect()
+    }
+
+    pub fn get_block_names(&self) -> Vec<String> {
+        self.blocks.iter().map(|block| block.name.clone()).collect()
     }
 }
 
@@ -185,6 +206,10 @@ impl BlockType {
     #[inline]
     pub fn get_holes(&self) -> usize {
         self.holes.len()
+    }
+
+    pub fn has_text(&self) -> bool {
+        matches!(self.name.as_str(), "Text" | "String" | "Variable")
     }
 
     // #[inline]

@@ -9,6 +9,38 @@ value = "Bool"
 concept_type = "Input"
 
 [[blocks]]
+name = "Constant Declaration"
+language = "javascript"
+holes = ["Variable", "Any"]
+connectors = ["Bottom"]
+template_string = "const {{1}} = {{2}}"
+in_hole = false
+value = "Unit"
+concept_type = "ControlFlow"
+
+[[blocks]]
+name = "ReDeclaration"
+language = "javascript"
+holes = ["Variable", "Any"]
+connectors = ["Bottom"]
+template_string = "{{1}} = {{2}}"
+in_hole = false
+value = "Unit"
+concept_type = "ControlFlow"
+
+
+[[blocks]]
+name = "Global Declaration"
+language = "javascript"
+holes = ["Variable", "Any"]
+connectors = ["Bottom"]
+template_string = "var {{1}} = {{2}}"
+in_hole = false
+value = "Unit"
+concept_type = "ControlFlow"
+
+[[blocks]]
+description = "### If Block\nAn `If` block is a fundamental control structure in programming that allows your program to make decisions based on specific conditions.\n\n#### **Structure and Usage** \n - **Condition Input**: The \"If\" block takes in a condition, which is a logical expression that evaluates to either true or false.\n- **True Branch (Blue Connector)**: If the condition evaluates to true, the block connected to the blue connector will be executed.\n- **Else Branch (Red Connector)**: If the condition evaluates to false, the code connected to the red connector (the else branch) will be executed instead. \n"
 name = "If"
 language = "javascript"
 holes = ["Bool"]
@@ -96,4 +128,35 @@ connectors = []
 template_string = "parseInt({{1}})"
 in_hole = true
 value = "Number"
+concept_type = "ControlFlow"
+
+
+[[blocks]]
+name = "Operation"
+language = "javascript"
+holes = ["Any", "Any", "Any"]
+connectors = []
+template_string = "{{1}} {{2}} {{3}}"
+value = "Any"
+in_hole = true
+concept_type = "Input"
+
+[[blocks]]
+name = "Start Loop"
+language = "javascript"
+holes = ["Bool"]
+connectors = ["Bottom"]
+template_string = "while ({{1}}) {"
+value = "Any"
+in_hole = false
+concept_type = "ControlFlow"
+
+[[blocks]]
+name = "End Loop"
+language = "javascript"
+holes = []
+connectors = ["Bottom"]
+template_string = "}"
+value = "Any"
+in_hole = false
 concept_type = "ControlFlow"

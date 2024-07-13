@@ -37,6 +37,11 @@ pub struct LineBundle {
 
 impl LineBundle {
     pub fn new(from: Entity, from_direction: ConnectionDirection, to: Entity) -> Self {
+        let color = match from_direction {
+            ConnectionDirection::Left => Color::BLUE,
+            ConnectionDirection::Right => Color::RED,
+            _ => Color::BLACK,
+        };
         Self {
             line: UiLine {
                 from,
@@ -44,7 +49,7 @@ impl LineBundle {
                 to,
                 to_direction: ConnectionDirection::Center,
             },
-            focus_bundle: LineFocusBundle::new(Color::RED, Color::GREEN, Color::WHITE),
+            focus_bundle: LineFocusBundle::new(Color::RED, Color::GREEN, color),
         }
     }
 }
@@ -102,7 +107,7 @@ pub struct UiLinePlugin;
 impl UiLinePlugin {
     fn configure_line(mut gizmos_store: ResMut<GizmoConfigStore>) {
         let (line_config, _) = gizmos_store.config_mut::<LineGizmos>();
-        line_config.line_width = 1.;
+        line_config.line_width = 2.;
     }
 
     fn spawn_new_line(
@@ -245,7 +250,10 @@ impl UiLinePlugin {
                 if let Ok((&from_entity_pos, &from_entity_size)) = changed_query.get(line.from) {
                     let (&to_pos, &to_size) = match changed_query.get(line.to).ok() {
                         Some(to) => to,
-                        None => query.get(line.to).unwrap(),
+                        None => match query.get(line.to).ok() {
+                            Some(val) => val,
+                            None => continue,
+                        },
                     };
                     ((from_entity_pos, from_entity_size), (to_pos, to_size))
                 } else if let Ok((&to_entity_pos, &to_entity_size)) = changed_query.get(line.to) {
